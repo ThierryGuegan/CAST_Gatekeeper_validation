@@ -30,7 +30,7 @@ file extension: .sql/.pkb/.cbl/... -> SQL checker, anything else -> ABAP checker
 
 Setup: pip install mcp        (see README.md)
 """
-import argparse, asyncio, csv, json
+import argparse, asyncio, contextlib, csv, json, os, sys
 from collections import Counter
 from pathlib import Path
 
@@ -143,6 +143,30 @@ def make_ctx(fam, path):
     return lines
 
 
+@contextlib.asynccontextmanager
+async def open_transport(url, headers):
+    """Open the MCP streamable-HTTP transport and yield (read_stream, write_stream).
+
+    Works with both generations of the `mcp` SDK:
+      * new SDK: streamable_http_client(url, http_client=...) - headers go on an HTTP client,
+                 and 2 streams are yielded;
+      * old SDK: streamablehttp_client(url, headers=...)      - 3 streams are yielded.
+    """
+    from mcp.client import streamable_http as sh
+    new = getattr(sh, "streamable_http_client", None)
+    if new is not None:
+        create = getattr(sh, "create_mcp_http_client", None)
+        if create is None:
+            from mcp.shared._httpx_utils import create_mcp_http_client as create
+        http = create(headers=headers)
+        async with http:
+            async with new(url, http_client=http) as streams:
+                yield streams[0], streams[1]
+    else:
+        async with sh.streamablehttp_client(url, headers=headers) as streams:
+            yield streams[0], streams[1]
+
+
 def run_check(fam, check, ctx, line, category=None):
     if fam == "manual":
         ev = " ".join(ctx[line - 1].split())[:300] if 1 <= line <= len(ctx) else ""
@@ -182,11 +206,10 @@ async def main():
 
     # imported here so --list-rules works without the mcp package
     from mcp import ClientSession
-    from mcp.client.streamable_http import streamablehttp_client
 
     root, rows, remaining, cache = Path(args.source_root), [], args.limit, {}
 
-    async with streamablehttp_client(args.url, headers={"x-api-key": args.api_key}) as (r, w, _):
+    async with open_transport(args.url, {"x-api-key": args.api_key}) as (r, w):
         async with ClientSession(r, w) as s:
             await s.initialize()
             for rid in resolve_rules(args.rule_ids):
@@ -259,5 +282,21 @@ async def main():
             print(f"FP  {x['rule']}  {x['file']}:{x['line']}  {x['reason']}")
 
 
+def _root_causes(exc):
+    """Flatten (nested) ExceptionGroups raised by anyio/MCP into the underlying errors."""
+    subs = getattr(exc, "exceptions", None)
+    return [c for e in subs for c in _root_causes(e)] if subs else [exc]
+
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        sys.exit(130)
+    except Exception as exc:  # connection / authentication / protocol errors
+        if os.environ.get("GATEKEEPER_DEBUG"):
+            raise
+        msg = "; ".join(sorted({f"{type(c).__name__}: {c}" for c in _root_causes(exc)}))
+        sys.exit(f"Error while talking to the MCP server: {msg}\n"
+                 "Check --url (http://<host>:8090/mcp/gatekeeper), --api-key and the network path. "
+                 "Set GATEKEEPER_DEBUG=1 for the full traceback.")
