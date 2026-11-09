@@ -82,6 +82,9 @@ Python 3 (developed and tested on 3.13) and the `mcp` package (only needed to ta
 pip install mcp
 ```
 
+Both generations of the `mcp` SDK are supported (the older `streamablehttp_client` and the newer
+`streamable_http_client`, whose interface differs); the runner detects which one is installed.
+
 Prerequisites on the Imaging side (see the Gatekeeper MCP documentation): a running Gatekeeper MCP server, an
 Imaging API key, and the **`EXCLUSION_MANAGER`** role if you want to create exclusions. The URL to use is the
 Imaging gateway one: `http://<host>:8090/mcp/gatekeeper` (or `https://<host>/mcp/gatekeeper`), **not** the MCP
@@ -107,6 +110,11 @@ server's own port.
    ```
 
 3. **Read `report.csv`**, sample the false positives, then optionally rerun with `--apply-exclusions`.
+
+**Passing the API key.** Shell variables are expanded by the shell, not by Python:
+`$IMAGING_KEY` works in bash, `$env:IMAGING_KEY` in PowerShell and `%IMAGING_KEY%` in Windows `cmd`. Replace
+`imaging` in the URL with your Imaging host name. Connection or authentication errors are printed as a short
+message; set `GATEKEEPER_DEBUG=1` for the full traceback.
 
 `--source-root` must contain every source language you want checked (ABAP, SQL, JS, …). The reported path is
 matched under that root; if it does not match exactly, the candidate sharing the longest trailing path is used.
