@@ -4,7 +4,8 @@ Triage CAST Imaging **Gatekeeper** violations as true or false positives, automa
 
 For each selected quality rule the tool
 
-1. fetches the violations from the Gatekeeper MCP server (`get_violations`),
+1. gets the violations from the Gatekeeper MCP server (`get_violations`) **or from an exported CSV/JSON file**
+   (`--input`, for Imaging versions that cannot run the MCP server),
 2. reads the source file at the reported line from a local checkout,
 3. runs the rule's checker and classifies the violation,
 4. writes a CSV report with the reason, the evidence and a ready-to-use justification,
@@ -85,6 +86,10 @@ pip install mcp
 Both generations of the `mcp` SDK are supported (the older `streamablehttp_client` and the newer
 `streamable_http_client`, whose interface differs); the runner detects which one is installed.
 
+> **Which Imaging version?** The Gatekeeper MCP server (release 3.0.0 and later) requires CAST Imaging
+> **3.6.4 or later**. With an older Imaging (e.g. 2.x) use `--input` with an export file instead: see
+> [Without the MCP server](#without-the-mcp-server-imaging-before-364).
+
 Prerequisites on the Imaging side (see the Gatekeeper MCP documentation): a running Gatekeeper MCP server, an
 Imaging API key, and the **`EXCLUSION_MANAGER`** role if you want to create exclusions. The URL to use is the
 Imaging gateway one: `http://<host>:8090/mcp/gatekeeper` (or `https://<host>/mcp/gatekeeper`), **not** the MCP
@@ -119,11 +124,46 @@ message; set `GATEKEEPER_DEBUG=1` for the full traceback.
 `--source-root` must contain every source language you want checked (ABAP, SQL, JS, …). The reported path is
 matched under that root; if it does not match exactly, the candidate sharing the longest trailing path is used.
 
+## Without the MCP server (Imaging before 3.6.4)
+
+Export the violations you want to triage as a **CSV** (or JSON) file and give it to `--input`. No server, API key
+or `mcp` package is needed.
+
+```bash
+python gatekeeper_validate.py --input violations.csv --source-root /path/to/checkout --rule-ids auto --limit 50 --out report.csv
+```
+
+**Required columns** (header names are matched loosely, case and punctuation ignored):
+
+| Information | Accepted headers (examples) |
+|---|---|
+| Rule id (number, or a label ending with it such as `Avoid ... (7544)`) | `Rule ID`, `Rule`, `Metric ID`, `Quality rule ID` |
+| File | `File`, `File path`, `Path`, `Source file` |
+| Line | `Line`, `Start line`, `Line number` (`12-15` is read as 12) |
+| Object (optional) | `Object full name`, `Object`, `Name` |
+
+Example:
+
+```csv
+Rule ID,File,Line,Object
+7544,abap/zprog.abap,2,ZPROG
+1020060,web/main.js,2,main
+```
+
+- The delimiter (`,` `;` or tab) is detected, and the encoding can be UTF-8 or Windows-1252, so a CSV saved from
+  Excel works as is. JSON works too: a list of records, an object keyed by rule id, or the `get_violations` shape.
+- Use `--dump` to see how your columns were understood and how many rows are usable (nothing is checked).
+- Rules in the file that have no checker, or are not selected by `--rule-ids`, are listed and skipped; use
+  `--rule-ids all` to include the review-only rules.
+- `--limit` and `--per-rule-limit` apply as usual. `--apply-exclusions` is not available in this mode (it needs the
+  MCP server): use the `justification` column of the report to create the exclusions yourself.
+
 ## Command line
 
 | Option | Description |
 |---|---|
-| `--url`, `--api-key`, `--app`, `--source-root` | Required (except with `--list-rules`). |
+| `--url`, `--api-key`, `--app`, `--source-root` | Required for the MCP server mode (except with `--list-rules`). |
+| `--input FILE` | Read the violations from a CSV/JSON export instead of the MCP server; only `--source-root` is then required. |
 | `--rule-ids` | `auto` (default: every rule with a checker), `abap`, `sapui5`, `web`, `sql`, `all` (auto + review-only), or a comma list such as `7520,1020600,1101114`. |
 | `--snapshot` | `latest` (default), a snapshot number, or `5,6` (as accepted by `get_violations`). |
 | `--limit N` | Check only the first **N violations overall**; rules are processed in order and the run stops at N. |
@@ -194,6 +234,7 @@ python test_abap_checkers.py
 python test_sapui5_checkers.py
 python test_sql_checkers.py
 python test_web_checkers.py
+python test_input_mode.py
 ```
 
 ## Known limitations
@@ -205,6 +246,8 @@ python test_web_checkers.py
 - **Line anchoring** (which line Imaging reports for each rule) is unverified. Checkers search the nearby
   statements and return `REVIEW` when the code is not what the rule expects, which usually means the checkout does
   not match the analyzed version.
+- **Export files:** the tool trusts the file path and line in the export; if the checkout differs from the analyzed
+  version, results are `REVIEW`.
 - **ABAP:** chained `:` statements are kept as one statement; CDS source is not handled.
 - **SQL:** statements are split on `;`, blank lines and `GO`; T-SQL without any of them can merge neighbouring
   statements. Joins and aliases are analysed for the first top-level `FROM` of a statement only.

@@ -3,7 +3,8 @@
 gatekeeper_validate - triage CAST Imaging Gatekeeper violations as true / false positives.
 
 For every selected quality rule the tool
-  1. fetches the violations through the Gatekeeper MCP server (tool get_violations),
+  1. gets the violations from the Gatekeeper MCP server (tool get_violations, needs Imaging >= 3.6.4)
+     or from an exported CSV/JSON file (--input, works with any Imaging version),
   2. reads the source file at the reported line from a local checkout,
   3. runs the rule's checker and classifies the violation
        TRUE_POSITIVE | FALSE_POSITIVE | REVIEW   (REVIEW = cannot be decided from the source),
@@ -17,6 +18,7 @@ Rule families (one checker module each):
                                React, Vue, CSS
   sql     sql_checkers.py      SQL Analyzer: PL/SQL, T-SQL, COBOL embedded SQL (rules 11010xx)
 
+Input:           --url/--api-key/--app (MCP server)  OR  --input violations.csv (no server needed)
 Rule selection:  --rule-ids auto | abap | sapui5 | web | sql | all | 7520,1020600,...
                  auto = every rule that has a real checker (default)
                  all  = auto + rules that can only get a REVIEW verdict
@@ -30,7 +32,7 @@ file extension: .sql/.pkb/.cbl/... -> SQL checker, anything else -> ABAP checker
 
 Setup: pip install mcp        (see README.md)
 """
-import argparse, asyncio, contextlib, csv, json, os, sys
+import argparse, asyncio, contextlib, csv, io, json, os, re, sys
 from collections import Counter
 from pathlib import Path
 
@@ -174,9 +176,148 @@ def run_check(fam, check, ctx, line, category=None):
     return check(ctx, line)
 
 
+# ----------------------------------------------------------------------------------------------
+# Violations read from an export file (CSV / JSON) instead of the MCP server
+# ----------------------------------------------------------------------------------------------
+HEADER_ALIASES = {  # normalised header (lower-case, letters and digits only) -> internal field
+    "rule": ["ruleid", "rule", "metricid", "qualityruleid", "ruleidentifier", "rulepattern", "rulenumber"],
+    "file": ["filepath", "file", "path", "sourcefile", "filename"],
+    "line": ["startline", "line", "linenumber", "lineno", "fromline"],
+    "object": ["objectfullname", "objectname", "object", "fullname", "name", "component"],
+    "rule_name": ["rulename", "qualityrule", "rulelabel"],
+}
+
+
+def _norm(h):
+    return re.sub(r"[^a-z0-9]", "", str(h).lower())
+
+
+def _rule_id(v):
+    m = re.search(r"(?<!\d)(\d{4,8})(?!\d)", str(v))
+    return m.group(1) if m else None
+
+
+def _normalise(rec):
+    low = {_norm(k): v for k, v in rec.items() if k is not None}
+    out = {}
+    for field, aliases in HEADER_ALIASES.items():
+        for a in aliases:
+            if a in low and str(low[a]).strip() != "":
+                out[field] = low[a]
+                break
+    return out
+
+
+def _json_records(node, rule=None):
+    if isinstance(node, list):
+        for x in node:
+            yield from _json_records(x, rule)
+    elif isinstance(node, dict):
+        if "file" in _normalise(node):
+            yield node if (not rule or "rule" in _normalise(node)) else {**node, "rule": rule}
+        else:
+            for k, v in node.items():
+                yield from _json_records(v, str(k).strip() if str(k).strip().isdigit() else rule)
+
+
+def load_violations(path):
+    """Read an export (CSV with , ; or tab, UTF-8 or Windows-1252; or JSON) -> (violations, info).
+
+    Each violation is {"rule", "file", "line", "objectFullName", "rule_name"}. Required columns: a rule id,
+    a file path and a line number (header names are matched loosely, see HEADER_ALIASES)."""
+    raw = Path(path).read_bytes()
+    for enc in ("utf-8-sig", "cp1252"):
+        try:
+            text = raw.decode(enc)
+            break
+        except UnicodeDecodeError:
+            continue
+    headers, records = [], []
+    if str(path).lower().endswith(".json") or text.lstrip()[:1] in "[{":
+        records = list(_json_records(json.loads(text)))
+        headers = sorted({k for r in records for k in r})
+    else:
+        first = text.splitlines()[0] if text.strip() else ""
+        delim = max(",;\t", key=first.count)
+        reader = csv.DictReader(io.StringIO(text), delimiter=delim)
+        headers, records = list(reader.fieldnames or []), list(reader)
+    viols, bad = [], 0
+    for rec in records:
+        n = _normalise(rec)
+        rid, ln = _rule_id(n.get("rule", "")), re.match(r"\s*(\d+)", str(n.get("line", "")))
+        if not rid or "file" not in n or not ln:
+            bad += 1
+            continue
+        viols.append({"rule": rid, "file": str(n["file"]).strip(), "line": ln.group(1),
+                      "objectFullName": n.get("object"), "rule_name": n.get("rule_name")})
+    return viols, {"headers": headers, "rows": len(records), "skipped": bad}
+
+
+def classify(v, rid, name, root, cache):
+    """Run the rule's checker on one violation and return the report row."""
+    file_, line = pick(v, "file"), pick(v, "line")
+    path = locate_source(root, file_)
+    fam, check = pick_checker(rid, path)
+    if path is None or not str(line).isdigit():
+        verdict, why, ev = RV, "Source file or line not found under --source-root", ""
+    else:
+        key = (path, fam)
+        if key not in cache:
+            cache[key] = make_ctx(fam, path)
+        cat = next((m[rid] for m in MANUAL if rid in m), None)
+        try:
+            verdict, why, ev = run_check(fam, check, cache[key], int(line), cat)
+        except Exception as e:  # a checker bug must never stop the batch
+            verdict, why, ev = RV, f"Checker error: {e!r}", ""
+    return {"rule": rid, "rule_name": name, "object": pick(v, "object"), "file": file_, "line": line,
+            "verdict": verdict, "reason": why, "evidence": ev,
+            "justification": f"[{rid}] {why}" if verdict == FP else "", "excluded": ""}
+
+
+async def triage(rules, fetch, exclude, args, root):
+    """Shared loop: `fetch(rid, quota)` yields the violations of a rule (None = skip it),
+    `exclude(v, row)` (MCP mode only) creates the exclusion and returns the text for the `excluded` column."""
+    rows, remaining, cache = [], args.limit, {}
+    for rid in rules:
+        if remaining is not None and remaining <= 0:
+            break
+        name = rule_name(rid)
+        if name is None:
+            print(f"[{rid}] unknown rule id, skipped (see --list-rules)")
+            continue
+        quota = min((x for x in (remaining, args.per_rule_limit) if x is not None), default=None)
+        viols = await fetch(rid, quota, name)
+        if viols is None:
+            continue
+        if quota is not None:
+            viols = viols[:quota]
+        for v in viols:
+            row = classify(v, rid, name, root, cache)
+            if exclude and row["verdict"] == FP:
+                row["excluded"] = await exclude(v, row)
+            rows.append(row)
+        if remaining is not None:
+            remaining -= len(viols)
+    return rows
+
+
+def write_report(rows, out):
+    cols = ["rule", "rule_name", "object", "file", "line", "verdict", "reason", "evidence", "justification", "excluded"]
+    with open(out, "w", newline="", encoding="utf-8-sig") as f:
+        wr = csv.DictWriter(f, fieldnames=cols)
+        wr.writeheader()
+        wr.writerows(rows)
+    print(dict(Counter(x["verdict"] for x in rows)), "->", out)
+    for x in rows:
+        if x["verdict"] == FP:
+            print(f"FP  {x['rule']}  {x['file']}:{x['line']}  {x['reason']}")
+
+
 async def main():
     ap = argparse.ArgumentParser(description="Triage CAST Gatekeeper violations as true/false positives "
                                              "(ABAP, SAPUI5, SQL, JavaScript/TypeScript/web). See README.md.")
+    ap.add_argument("--input", help="read the violations from a CSV/JSON export instead of the MCP server "
+                                    "(needs only --source-root; for Imaging versions without the MCP server)")
     ap.add_argument("--url")
     ap.add_argument("--api-key")
     ap.add_argument("--app")
@@ -200,86 +341,80 @@ async def main():
             for cat, ids in groups.items():
                 print(f"\nREVIEW only [{lang}] - {cat}:\n  {', '.join(map(str, ids))}")
         return
-    for req in ("url", "api_key", "app", "source_root"):
-        if not getattr(args, req):
-            ap.error(f"--{req.replace('_', '-')} is required")
+    if args.input:
+        if args.apply_exclusions:
+            ap.error("--apply-exclusions needs the MCP server; with --input use the justification column of the report")
+        if not args.source_root:
+            ap.error("--source-root is required")
+    else:
+        for req in ("url", "api_key", "app", "source_root"):
+            if not getattr(args, req):
+                ap.error(f"--{req.replace('_', '-')} is required (or use --input FILE)")
+    root = Path(args.source_root)
 
-    # imported here so --list-rules works without the mcp package
+    if args.input:
+        viols, info = load_violations(args.input)
+        if not viols:
+            sys.exit(f"No usable violation found in {args.input} ({info['rows']} row(s), {info['skipped']} unusable).\n"
+                     f"Detected columns: {info['headers']}\n"
+                     "Needed: a rule id (e.g. 'Rule ID'), a file path ('File'/'Path') and a line ('Line'/'Start line').")
+        by_rule = {}
+        for v in viols:
+            by_rule.setdefault(v["rule"], []).append(v)
+        wanted = resolve_rules(args.rule_ids)
+        if args.dump:
+            print(f"columns: {info['headers']}\nrows: {info['rows']}, usable: {len(viols)}, unusable: {info['skipped']}")
+            for rid, vs in by_rule.items():
+                print(f"  rule {rid}: {len(vs)} violation(s), e.g. {vs[0]['file']}:{vs[0]['line']}")
+            return
+        todo = [r for r in wanted if r in by_rule]
+        ignored = sorted(set(by_rule) - set(todo), key=int)
+        if ignored:
+            n_ign = sum(len(by_rule[r]) for r in ignored)
+            print(f"Not checked: {n_ign} violation(s) of rule(s) {', '.join(ignored)} "
+                  f"(no checker or not selected by --rule-ids; use --rule-ids all to list review-only rules)")
+
+        async def fetch(rid, quota, name):
+            return by_rule[rid]
+        rows = await triage(todo, fetch, None, args, root)
+        write_report(rows, args.out)
+        return
+
+    # imported here so --list-rules and --input work without the mcp package
     from mcp import ClientSession
-
-    root, rows, remaining, cache = Path(args.source_root), [], args.limit, {}
 
     async with open_transport(args.url, {"x-api-key": args.api_key}) as (r, w):
         async with ClientSession(r, w) as s:
             await s.initialize()
-            for rid in resolve_rules(args.rule_ids):
-                if remaining is not None and remaining <= 0:
-                    break
-                name = rule_name(rid)
-                if name is None:
-                    print(f"[{rid}] unknown rule id, skipped (see --list-rules)")
-                    continue
-                quota = min((x for x in (remaining, args.per_rule_limit) if x is not None), default=None)
+
+            async def fetch(rid, quota, name):
                 params = {"application_name": args.app, "snapshot": args.snapshot,
                           "rule_pattern": rid, "include_findings": True,
                           "nb_rows": "$all" if quota is None else max(10, quota)}   # API minimum is 10
                 raw = text_of(await s.call_tool("get_violations", params))
                 if args.dump:
                     print(f"=== {rid} {name} ===\n{raw[:4000]}")
-                    continue
+                    return None
                 try:
-                    payload = json.loads(raw)
+                    return list(find_violations(json.loads(raw)))
                 except json.JSONDecodeError:
                     print(f"[{rid}] non-JSON response, skipped: {raw[:200]}")
-                    continue
-                viols = list(find_violations(payload))
-                if quota is not None:
-                    viols = viols[:quota]
-                for v in viols:
-                    file_, line = pick(v, "file"), pick(v, "line")
-                    path = locate_source(root, file_)
-                    fam, check = pick_checker(rid, path)
-                    if path is None or not str(line).isdigit():
-                        verdict, why, ev = RV, "Source file or line not found under --source-root", ""
-                    else:
-                        key = (path, fam)
-                        if key not in cache:
-                            cache[key] = make_ctx(fam, path)
-                        cat = next((m[rid] for m in MANUAL if rid in m), None)
-                        try:
-                            verdict, why, ev = run_check(fam, check, cache[key], int(line), cat)
-                        except Exception as e:  # a checker bug must never stop the batch
-                            verdict, why, ev = RV, f"Checker error: {e!r}", ""
-                    row = {"rule": rid, "rule_name": name, "object": pick(v, "object"),
-                           "file": file_, "line": line, "verdict": verdict, "reason": why,
-                           "evidence": ev,
-                           "justification": f"[{rid}] {why}" if verdict == FP else "",
-                           "excluded": ""}
-                    if args.apply_exclusions and verdict == FP:
-                        ch, rh = pick(v, "component_href"), pick(v, "rule_href")
-                        if ch and rh:
-                            await s.call_tool("manage_exclusion", {
-                                "operation": "add", "application_name": args.app,
-                                "component_href": ch, "rule_pattern_href": rh,
-                                "comment": f"False positive (automated check). {why}. Evidence: {ev}"[:900]})
-                            row["excluded"] = "yes"
-                        else:
-                            row["excluded"] = "no (missing href)"
-                    rows.append(row)
-                if remaining is not None:
-                    remaining -= len(viols)
+                    return None
 
-    if args.dump:
-        return
-    cols = ["rule", "rule_name", "object", "file", "line", "verdict", "reason", "evidence", "justification", "excluded"]
-    with open(args.out, "w", newline="", encoding="utf-8-sig") as f:
-        wr = csv.DictWriter(f, fieldnames=cols)
-        wr.writeheader()
-        wr.writerows(rows)
-    print(dict(Counter(x["verdict"] for x in rows)), "->", args.out)
-    for x in rows:
-        if x["verdict"] == FP:
-            print(f"FP  {x['rule']}  {x['file']}:{x['line']}  {x['reason']}")
+            async def exclude(v, row):
+                ch, rh = pick(v, "component_href"), pick(v, "rule_href")
+                if not (ch and rh):
+                    return "no (missing href)"
+                await s.call_tool("manage_exclusion", {
+                    "operation": "add", "application_name": args.app,
+                    "component_href": ch, "rule_pattern_href": rh,
+                    "comment": f"False positive (automated check). {row['reason']}. Evidence: {row['evidence']}"[:900]})
+                return "yes"
+
+            rows = await triage(resolve_rules(args.rule_ids), fetch, exclude if args.apply_exclusions else None,
+                                args, root)
+    if not args.dump:
+        write_report(rows, args.out)
 
 
 def _root_causes(exc):
