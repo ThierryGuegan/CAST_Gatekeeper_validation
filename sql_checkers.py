@@ -103,7 +103,7 @@ def kw(rx, label, bare_only=True):
             return FP, f"{label} appears only inside a string literal", ctx.ev(a, z)
         if re.search(rx, raw, re.I | re.S):
             return FP, f"{label} appears only in a comment", ctx.ev(a, z)
-        return FP, f"No {label} in the statement at this line (source may differ from the analyzed version)", ctx.ev(a, z)
+        return RV, f"No {label} in the statement at this line (source may differ from the analyzed version)", ctx.ev(a, z)
     return chk
 
 
@@ -257,7 +257,7 @@ def chk_alias(missing):                                                # 1101072
             return err
         code, bare, a, z, ft, wt = p
         if not re.search(r"\bSELECT\b", bare, re.I):
-            return FP, "Not a query (no SELECT) at this line", ctx.ev(a, z)
+            return RV, "Not a query (no SELECT) at this line", ctx.ev(a, z)
         items = [it for it in table_items(ft) if not it["sub"] and it["name"]]
         if missing:
             bad = [it["name"] for it in items if not it["alias"]]
@@ -295,7 +295,7 @@ def chk_distinct(ctx, n):                                              # 1101034
         return TP, "SELECT DISTINCT forces a sort/dedup of the whole result", ctx.ev(a, z)
     if re.search(r"\bDISTINCT\b", bare, re.I):
         return FP, "DISTINCT is used inside an aggregate, not on the SELECT result", ctx.ev(a, z)
-    return FP, "No DISTINCT in the statement at this line", ctx.ev(a, z)
+    return RV, "No DISTINCT in the statement at this line", ctx.ev(a, z)
 
 
 def chk_order_by_number(ctx, n):                                       # 1101012
@@ -379,7 +379,7 @@ def chk_like(wildcard_first):                                          # 1101060
         lits = re.findall(r"\bLIKE\s+('(?:[^']|'')*')", code, re.I)
         concat = re.findall(r"\bLIKE\s+(.{0,60})", bare, re.I)
         if not lits and not concat:
-            return FP, "No LIKE condition in the statement at this line", ctx.ev(a, z)
+            return RV, "No LIKE condition in the statement at this line", ctx.ev(a, z)
         for lit in lits:
             body = lit[1:-1]
             if wildcard_first and re.match(r"[%_]", body):
@@ -430,7 +430,7 @@ def chk_quoted_ident(ctx, n):                                          # 1101020
     code, bare, a, z = r
     if re.search(r'"_+"|`_+`', bare) or re.search(r'\[[A-Za-z_][\w ]*\]', bare):
         return TP, "Quoted identifier (\"name\", [name] or `name`): case/characters become significant", ctx.ev(a, z)
-    return FP, "No quoted identifier in the statement at this line", ctx.ev(a, z)
+    return RV, "No quoted identifier in the statement at this line", ctx.ev(a, z)
 
 
 # ---------------------------------- dynamic SQL / injection ----------------------------------
@@ -445,7 +445,7 @@ def chk_injection(ctx, n):                                             # 1101096
     code, bare, a, z = r
     m = re.search(r"\bEXECUTE\s+IMMEDIATE\b(.*)", bare, re.I | re.S)
     if not m:
-        return FP, "No EXECUTE IMMEDIATE in the statement at this line", ctx.ev(a, z)
+        return RV, "No EXECUTE IMMEDIATE in the statement at this line", ctx.ev(a, z)
     arg = re.split(r"\bUSING\b|\bINTO\b|\bRETURNING\b", m.group(1), flags=re.I)[0]
     if "||" in arg:
         if re.search(r"DBMS_ASSERT", code, re.I):
@@ -463,7 +463,7 @@ def chk_when_others_null(ctx, n):                                      # 1101054
     win = " ".join(ctx.bare[n - 1:n + 3])
     m = re.search(r"\bWHEN\s+OTHERS\s+THEN\s+(NULL\s*;|[^;]*;)", win, re.I)
     if not m:
-        return FP, "No WHEN OTHERS THEN handler at this line", ctx.ev(n, n + 3)
+        return RV, "No WHEN OTHERS THEN handler at this line", ctx.ev(n, n + 3)
     if re.match(r"NULL\s*;", m.group(1), re.I):
         return TP, "WHEN OTHERS THEN NULL silently swallows every error", ctx.ev(n, n + 3)
     return FP, f"The WHEN OTHERS handler does something: {m.group(1).strip()[:60]}", ctx.ev(n, n + 3)
@@ -546,7 +546,7 @@ def make_loop(pattern, label, critical_name):
             return NOLINE
         code, bare, a, z = r
         if not rx.search(bare):
-            return FP, f"No {label} at the reported line (source may differ from the analyzed version)", ctx.ev(a, z)
+            return RV, f"No {label} at the reported line (source may differ from the analyzed version)", ctx.ev(a, z)
         lp = inside_loop(ctx, a)
         if lp:
             return TP, f"{label} executed inside a {lp} loop", ctx.ev(a, z)

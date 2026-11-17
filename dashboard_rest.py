@@ -10,6 +10,8 @@ Endpoints used (REST API reference, "Engineering Resources" / "Application Struc
   GET <diagnosis.findings.href>                                          -> findings of one violation
   GET <component.sourceCodes.href>                                       -> source code fragments of the component
 
+  GET <file.href>                                                        -> the analysed source file (text/plain)
+
 All `href` values are relative to {rest} (the server's "/rest/" root). Authentication is either HTTP Basic
 (user + password) or an API key (X-API-KEY + X-API-USER headers).
 
@@ -19,7 +21,9 @@ Use `gatekeeper_validate.py --dump` to see what your server really returns.
 """
 import base64
 import json
+import os
 import re
+import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -69,6 +73,32 @@ class DashboardClient:
             return json.loads(body)
         except json.JSONDecodeError:
             raise RestError(f"Not JSON from {u}: {body[:200]!r}") from None
+
+    def get_text(self, path, params=None):
+        u = self.url(path, params)
+        req = urllib.request.Request(u, headers={**self.headers, "Accept": "text/plain, */*"})
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as r:
+                return r.read()
+        except urllib.error.HTTPError as e:
+            raise RestError(f"HTTP {e.code} on {u}") from None
+        except urllib.error.URLError as e:
+            raise RestError(f"Cannot reach {u}: {e.reason}") from None
+
+    def download(self, file_href, name=None, cache_dir=None):
+        """Download a source file (GET <file.href>, text/plain) once and return its local Path.
+        The server copy is the analysed version, so line numbers match the violations exactly."""
+        if not hasattr(self, "_files"):
+            self._files = {}
+            self._dir = cache_dir or tempfile.mkdtemp(prefix="gatekeeper_src_")
+        if file_href not in self._files:
+            os.makedirs(self._dir, exist_ok=True)
+            base = re.split(r"[\\/]", name or "")[-1] or "file"
+            dest = os.path.join(self._dir, f"{file_href.rstrip('/').split('/')[-1]}_{base}")
+            with open(dest, "wb") as f:
+                f.write(self.get_text(file_href))
+            self._files[file_href] = dest
+        return self._files[file_href]
 
     # ---- applications / snapshots ----------------------------------------------------------------
     def find_application(self, name):
@@ -123,7 +153,7 @@ class DashboardClient:
         return out
 
     def locations(self, v):
-        """Return [(file, line)] for one violation: findings first (violation-specific lines), then the
+        """Return [(file, line, file_href)] for one violation: findings first (violation-specific lines), then the
         component's own source code. An empty list means the server gave no location."""
         for href in (_href(v, "diagnosis", "findings"), _href(v, "component", "sourceCodes")):
             if not href:
@@ -164,30 +194,31 @@ def _href(d, *keys):
 
 
 def _file_of(node):
+    """(file name or path, file href or None) of an object that describes a file."""
     f = node.get("file")
     if isinstance(f, dict):
         for k in ("path", "fullName", "name"):
             if f.get(k):
-                return str(f[k])
-        return None
+                return str(f[k]), (f.get("href") if isinstance(f.get("href"), str) else None)
+        return None, None
     if isinstance(f, str):
-        return f
+        return f, None
     for k in ("filePath", "file_path", "path", "fileName", "filename"):
         if isinstance(node.get(k), str) and node[k]:
-            return node[k]
-    return None
+            return node[k], None
+    return None, None
 
 
 def extract_locations(node):
-    """Yield (file, line) for every object that has a start line and a file, anywhere in the JSON."""
+    """Yield (file, line, file_href) for every object that has a start line and a file, anywhere in the JSON."""
     if isinstance(node, list):
         for x in node:
             yield from extract_locations(x)
     elif isinstance(node, dict):
         line = next((node[k] for k in ("startLine", "start_line", "line") if node.get(k) not in (None, "")), None)
-        f = _file_of(node)
+        f, href = _file_of(node)
         if line is not None and f and re.match(r"\s*\d+", str(line)):
-            yield f, int(re.match(r"\s*(\d+)", str(line)).group(1))
+            yield f, int(re.match(r"\s*(\d+)", str(line)).group(1)), href
         for v in node.values():
             if isinstance(v, (list, dict)):
                 yield from extract_locations(v)
@@ -196,8 +227,8 @@ def extract_locations(node):
 def dedupe(items):
     seen, out = set(), []
     for it in items:
-        if it not in seen:
-            seen.add(it)
+        if it[:2] not in seen:
+            seen.add(it[:2])
             out.append(it)
     return out
 

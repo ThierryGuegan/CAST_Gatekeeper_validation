@@ -117,7 +117,7 @@ def chk_empty_catch(ctx, n):                                         # 1020176
         return NOLINE
     body, end, m = body_after(ctx, n, r"\bcatch\b\s*(?:\([^)]*\))?\s*\{")
     if m is None:
-        return FP, "No catch block at the reported line (source may differ from the analyzed version)", _ev(ctx, n)
+        return RV, "No catch block at the reported line (source may differ from the analyzed version)", _ev(ctx, n)
     if body is None:
         return RV, "Could not match the catch block braces", _ev(ctx, n)
     if body.strip():
@@ -132,7 +132,7 @@ def chk_empty_finally(ctx, n):                                       # 1020178
         return NOLINE
     body, end, m = body_after(ctx, n, r"\bfinally\b\s*\{")
     if m is None:
-        return FP, "No finally block at the reported line", _ev(ctx, n)
+        return RV, "No finally block at the reported line", _ev(ctx, n)
     if body is not None and not body.strip():
         return TP, "The finally block is empty", _ev(ctx, n, end)
     return FP, "The finally block contains statements", _ev(ctx, n, end)
@@ -143,7 +143,7 @@ def chk_empty_did_catch(ctx, n):                                     # 1020452, 
         return NOLINE
     body, end, m = body_after(ctx, n, r"\bcomponentDidCatch\b\s*\([^)]*\)\s*(?::\s*\w+\s*)?\{")
     if m is None:
-        return FP, "No componentDidCatch method at the reported line", _ev(ctx, n)
+        return RV, "No componentDidCatch method at the reported line", _ev(ctx, n)
     if body is not None and not body.strip():
         return TP, "componentDidCatch is empty: React errors are swallowed", _ev(ctx, n, end)
     return FP, "componentDidCatch handles the error", _ev(ctx, n, end)
@@ -154,7 +154,7 @@ def chk_switch_default(ctx, n):                                      # 1020180
         return NOLINE
     body, end, m = body_after(ctx, n, r"\bswitch\b[^{]*\{")
     if m is None:
-        return FP, "No switch statement at the reported line", _ev(ctx, n)
+        return RV, "No switch statement at the reported line", _ev(ctx, n)
     if body is None:
         return RV, "Could not match the switch braces", _ev(ctx, n)
     depth = 0
@@ -169,7 +169,7 @@ def chk_break_in_for(ctx, n):                                        # 1020182
     if not ctx.ok(n):
         return NOLINE
     if not re.search(r"\bbreak\b", ctx.bare[n - 1]):
-        return FP, "No break statement at the reported line", _ev(ctx, n)
+        return RV, "No break statement at the reported line", _ev(ctx, n)
     if re.search(r"\bbreak\s+[A-Za-z_$]", ctx.bare[n - 1]):
         return RV, "Labeled break: the target loop must be checked manually", _ev(ctx, n)
     for k in reversed(stack_at(ctx, n)):
@@ -186,7 +186,7 @@ def chk_function_in_loop(ctx, n):                                    # 1020038
         return NOLINE
     _, bare, a, z = ctx.span(n)
     if not re.search(r"\bfunction\b|=>", bare):
-        return FP, "No function definition at the reported line", ctx.ev(a, z)
+        return RV, "No function definition at the reported line", ctx.ev(a, z)
     lp = enclosing_loop(ctx, n, {"for", "while", "do"})
     if lp:
         return TP, f"A function is created on every iteration of the enclosing {lp} loop", ctx.ev(a, z)
@@ -199,7 +199,7 @@ def chk_call_in_loop_condition(ctx, n):                              # 1020006
     text = " ".join(ctx.bare[n - 1:n + 2])
     m = re.search(r"\bfor\s*\(", text)
     if not m:
-        return FP, "No for loop at the reported line", _ev(ctx, n)
+        return RV, "No for loop at the reported line", _ev(ctx, n)
     depth, k = 0, m.end() - 1
     for j in range(k, len(text)):
         depth += (text[j] == "(") - (text[j] == ")")
@@ -222,7 +222,7 @@ def make_ws_loop(pattern, label):
             return NOLINE
         _, bare, a, z = ctx.span(n)
         if not rx.search(bare):
-            return FP, f"No {label} call at the reported line", ctx.ev(a, z)
+            return RV, f"No {label} call at the reported line", ctx.ev(a, z)
         lp = enclosing_loop(ctx, n)
         if lp:
             return TP, f"{label} call inside a {lp} loop: one request per iteration", ctx.ev(a, z)
@@ -235,7 +235,7 @@ def chk_string_concat_loop(ctx, n):                                  # 1020828
         return NOLINE
     code = ctx.code[n - 1]
     if not re.search(r"[\w$.\]]\s*\+=\s*[\"'`]|[\w$.\]]\s*=\s*[\w$.\]]+\s*\+\s*[\"'`]|\+=\s*[\w$.]+\s*\+\s*[\"'`]", code):
-        return FP, "No string concatenation assignment at the reported line", _ev(ctx, n)
+        return RV, "No string concatenation assignment at the reported line", _ev(ctx, n)
     lp = enclosing_loop(ctx, n)
     if lp:
         return TP, f"String built by concatenation inside a {lp} loop (use an array join / template)", _ev(ctx, n)
@@ -248,7 +248,7 @@ def make_json_try(label="JSON.parse / JSON.stringify"):
             return NOLINE
         _, bare, a, z = ctx.span(n)
         if not re.search(r"\bJSON\s*\.\s*(?:parse|stringify)\s*\(", bare):
-            return FP, f"No {label} call at the reported line", ctx.ev(a, z)
+            return RV, f"No {label} call at the reported line", ctx.ev(a, z)
         if protected_by_try(ctx, n):
             return FP, f"The {label} call is inside a try block", ctx.ev(a, z)
         return TP, f"{label} can throw but is not inside a try/catch", ctx.ev(a, z)
@@ -261,7 +261,7 @@ def chk_sync_fs(ctx, n):                                             # 1020780
     _, bare, a, z = ctx.span(n)
     m = re.search(r"\bfs\s*\.\s*(\w+Sync)\s*\(", bare)
     if not m:
-        return FP, "No synchronous fs call at the reported line", ctx.ev(a, z)
+        return RV, "No synchronous fs call at the reported line", ctx.ev(a, z)
     if protected_by_try(ctx, n):
         return FP, f"fs.{m.group(1)} is inside a try block", ctx.ev(a, z)
     return TP, f"fs.{m.group(1)} throws on failure and is not inside a try/catch", ctx.ev(a, z)
@@ -273,7 +273,7 @@ def chk_error_not_thrown(ctx, n):                                    # 1020802
     _, bare, a, z = ctx.span(n)
     m = re.search(r"\bnew\s+\w*Error\s*\(", bare)
     if not m:
-        return FP, "No Error object creation at the reported line", ctx.ev(a, z)
+        return RV, "No Error object creation at the reported line", ctx.ev(a, z)
     pre = bare[:m.start()].strip()
     if pre == "" or pre.endswith((";", "{", "}")):
         return TP, "An Error object is created but never thrown, returned or passed on", ctx.ev(a, z)
@@ -288,7 +288,7 @@ def make_jump_in_finally(words):
             return NOLINE
         m = rx.search(ctx.bare[n - 1])
         if not m:
-            return FP, f"No {'/'.join(words)} statement at the reported line", _ev(ctx, n)
+            return RV, f"No {'/'.join(words)} statement at the reported line", _ev(ctx, n)
         kw = m.group(1)
         for k in reversed(stack_at(ctx, n)):
             if k == "finally":
@@ -306,7 +306,7 @@ def chk_super_twice(ctx, n):                                         # 1020812
         return NOLINE
     body, end, m = body_after(ctx, n, r"\bconstructor\b\s*\([^)]*\)\s*\{")
     if m is None:
-        return FP, "No constructor at the reported line", _ev(ctx, n)
+        return RV, "No constructor at the reported line", _ev(ctx, n)
     cnt = len(re.findall(r"\bsuper\s*\(", body or ""))
     if cnt >= 2:
         return TP, f"super() is called {cnt} times in the constructor", _ev(ctx, n, end)
@@ -319,7 +319,7 @@ def chk_node_callback_err(ctx, n):                                   # 1020700, 
     text = "\n".join(ctx.bare[n - 1:n + 60])
     m = re.search(r"(?:function\s*[\w$]*\s*\(\s*|\(\s*|(?<![\w$.]))(err|error|e|er)\s*(?:,[^)]*)?\)?\s*(?:=>\s*)?\{", text)
     if not m or not re.search(r"function|=>", text[:m.end()]):
-        return FP, "No error-first callback at the reported line", _ev(ctx, n)
+        return RV, "No error-first callback at the reported line", _ev(ctx, n)
     name = m.group(1)
     k = text.find("{", m.end() - 1)
     depth = 0
@@ -341,7 +341,7 @@ def make_subscribe_error(ctx, n):                                    # 1020822
     code, bare, a, z = ctx.span(n, 15)
     m = re.search(r"\.subscribe\s*\(", bare)
     if not m:
-        return FP, "No subscribe() call at the reported line", ctx.ev(a, z)
+        return RV, "No subscribe() call at the reported line", ctx.ev(a, z)
     depth, parts, last = 0, [], m.end()
     for j in range(m.end(), len(bare)):
         ch = bare[j]
@@ -370,7 +370,7 @@ def make_cookie(flag):
             return NOLINE
         win, winb = " ".join(ctx.code[n - 1:n + 6]), " ".join(ctx.bare[n - 1:n + 6])
         if not COOKIE_CALL.search(winb):
-            return FP, "No cookie creation at the reported line", _ev(ctx, n, n + 2)
+            return RV, "No cookie creation at the reported line", _ev(ctx, n, n + 2)
         if flag == "httponly":
             if re.search(r"httpOnly\s*:\s*true|;\s*httponly", win, re.I):
                 return FP, "The cookie is created with HttpOnly", _ev(ctx, n, n + 2)
@@ -407,7 +407,7 @@ def chk_hard_password(ctx, n):                                       # 1020104, 
     code = ctx.code[n - 1]
     m = re.search(r"(?i)[\w$.]*(?:pass(?:word|wd|phrase)?|pwd|secret)[\w$]*[\"']?\s*[:=]\s*[\"'`]([^\"'`]*)[\"'`]", code)
     if not m:
-        return FP, "No password assigned from a literal at the reported line", _ev(ctx, n)
+        return RV, "No password assigned from a literal at the reported line", _ev(ctx, n)
     v = m.group(1)
     if v == "":
         return FP, "The password is initialised with an empty string", _ev(ctx, n)
@@ -422,7 +422,7 @@ def chk_hard_apikey(ctx, n):                                         # 1020932
     m = re.search(r"(?i)[\w$.]*(?:api[_-]?key|apikey|access[_-]?token|secret[_-]?key|client[_-]?secret|auth[_-]?token)[\w$]*[\"']?\s*[:=]\s*[\"'`]([A-Za-z0-9_\-./+=]{8,})[\"'`]", ctx.code[n - 1])
     if m:
         return TP, "API key/token hard-coded in the source", _ev(ctx, n)
-    return FP, "No API key literal at the reported line", _ev(ctx, n)
+    return RV, "No API key literal at the reported line", _ev(ctx, n)
 
 
 def chk_hard_network(ctx, n):                                        # 1020070, 1020826
@@ -433,7 +433,7 @@ def chk_hard_network(ctx, n):                                        # 1020070, 
         if re.search(r"w3\.org|localhost|127\.0\.0\.1|example\.(?:com|org)|schemas\.|json-schema", v):
             return RV, f"Literal {v} is a namespace/local address: confirm", _ev(ctx, n)
         return TP, f"Network resource {v} is hard-coded", _ev(ctx, n)
-    return FP, "No hard-coded URL / IP / UNC path at the reported line", _ev(ctx, n)
+    return RV, "No hard-coded URL / IP / UNC path at the reported line", _ev(ctx, n)
 
 
 # ------------------------------------ file-level (Node/Angular/Vue) ------------------------------
@@ -482,7 +482,7 @@ def chk_vfor_key(ctx, n):                                            # 1020206
     t = tag_at(ctx, n)
     m = re.search(r"<[^<>]*\bv-for\s*=[^<>]*>", t)
     if not m:
-        return FP, "No v-for element at the reported line", _ev(ctx, n)
+        return RV, "No v-for element at the reported line", _ev(ctx, n)
     if re.search(r"(?:\s:key|v-bind:key)\s*=", m.group(0)):
         return FP, "The v-for element has a :key", _ev(ctx, n)
     return TP, "v-for without :key: Vue cannot track items", _ev(ctx, n)
@@ -506,7 +506,7 @@ def make_track(attr, ok_word, label):
         t = tag_at(ctx, n)
         m = re.search(attr + r"\s*=\s*[\"']([^\"']*)[\"']", t)
         if not m:
-            return FP, f"No {label} at the reported line", _ev(ctx, n)
+            return RV, f"No {label} at the reported line", _ev(ctx, n)
         if re.search(ok_word, m.group(1)):
             return FP, f"The {label} has a track-by/trackBy option", _ev(ctx, n)
         return TP, f"{label} without a track-by/trackBy option: the DOM is rebuilt on every change", _ev(ctx, n)
@@ -518,7 +518,7 @@ def chk_sync_script(ctx, n):                                         # 1020020
         return NOLINE
     m = re.search(r"<script\b[^>]*>", " ".join(ctx.code[n - 1:n + 3]), re.I)
     if not m:
-        return FP, "No <script> tag at the reported line", _ev(ctx, n)
+        return RV, "No <script> tag at the reported line", _ev(ctx, n)
     tag = m.group(0)
     if not re.search(r"\bsrc\s*=", tag, re.I):
         return FP, "Inline script (not an import)", _ev(ctx, n)
@@ -541,7 +541,7 @@ def chk_inline_function(ctx, n):                                     # 1020092
         return TP, "A JavaScript function is defined directly in the web page", _ev(ctx, n)
     if re.search(r"\bfunction\s+[\w$]+\s*\(", ctx.bare[n - 1]):
         return RV, "Function declaration found but it was not recognised as inside an inline <script>", _ev(ctx, n)
-    return FP, "No function declaration at the reported line", _ev(ctx, n)
+    return RV, "No function declaration at the reported line", _ev(ctx, n)
 
 
 def chk_doctype(ctx, n):                                             # 1020196
@@ -555,7 +555,7 @@ def chk_doctype(ctx, n):                                             # 1020196
         return TP, f"Legacy DOCTYPE: {m.group(0)[:60]}", _ev(ctx, n)
     if not any(re.search(r"<!DOCTYPE", l, re.I) for l in ctx.raw):
         return TP, "No DOCTYPE in the page: browsers use quirks mode", _ev(ctx, n)
-    return FP, "No DOCTYPE at the reported line", _ev(ctx, n)
+    return RV, "No DOCTYPE at the reported line", _ev(ctx, n)
 
 
 def chk_ie_cond_comment(ctx, n):                                     # 1020198
@@ -563,7 +563,7 @@ def chk_ie_cond_comment(ctx, n):                                     # 1020198
         return NOLINE
     if re.search(r"<!--\s*\[if\b|<!\s*\[endif\]", ctx.raw[n - 1], re.I):
         return TP, "IE conditional comment", _ev(ctx, n)
-    return FP, "No IE conditional comment at the reported line", _ev(ctx, n)
+    return RV, "No IE conditional comment at the reported line", _ev(ctx, n)
 
 
 def chk_vue_data(ctx, n):                                            # 1020200
@@ -574,7 +574,7 @@ def chk_vue_data(ctx, n):                                            # 1020200
         return FP, "data is a function returning a fresh object", _ev(ctx, n)
     if re.search(r"\bdata\s*:\s*\{", b):
         return TP, "data is a plain object shared between component instances", _ev(ctx, n)
-    return FP, "No data option at the reported line", _ev(ctx, n)
+    return RV, "No data option at the reported line", _ev(ctx, n)
 
 
 def chk_prefix_without_standard(ctx, n):                             # 1030110
@@ -582,7 +582,7 @@ def chk_prefix_without_standard(ctx, n):                             # 1030110
         return NOLINE
     m = re.search(r"(?<![\w-])-(?:webkit|moz|ms|o)-([\w-]+)\s*:", ctx.bare[n - 1])
     if not m:
-        return FP, "No vendor-prefixed property at the reported line", _ev(ctx, n)
+        return RV, "No vendor-prefixed property at the reported line", _ev(ctx, n)
     text = "\n".join(ctx.bare)
     off = sum(len(l) + 1 for l in ctx.bare[:n - 1])
     s, e = text.rfind("{", 0, off), text.find("}", off)
@@ -597,7 +597,9 @@ def chk_jquery_dup_selector(ctx, n):                                 # 1020308
         return NOLINE
     m = re.search(r"(?:\$|jQuery)\s*\(\s*([\"'])([^\"']+)\1\s*\)", ctx.code[n - 1])
     if not m:
-        return FP, "No jQuery selector call at the reported line", _ev(ctx, n)
+        if re.search(r"(?:\$|jQuery)\s*\(", ctx.bare[n - 1]):
+            return RV, "jQuery wraps an expression ($(this), $(event.target), ...): repeated wrapping of the same object cannot be decided from this line", _ev(ctx, n)
+        return RV, "No jQuery selector call at the reported line", _ev(ctx, n)
     sel = m.group(2)
     lines = [i + 1 for i, l in enumerate(ctx.code)
              if re.search(r"(?:\$|jQuery)\s*\(\s*[\"']" + re.escape(sel) + r"[\"']\s*\)", l)]
@@ -612,13 +614,19 @@ def chk_ajax_option(missing, label):                                 # 1020322 /
             return NOLINE
         code, bare, a, z = ctx.span(n, 25)
         if not re.search(r"(?:\$|jQuery)\s*\.\s*ajax\s*\(", bare):
-            return FP, "No $.ajax call at the reported line", ctx.ev(a, z)
+            return RV, "No $.ajax call at the reported line", ctx.ev(a, z)
         if missing == "dataType":
             return (FP, "dataType is set", ctx.ev(a, z)) if re.search(r"\bdataType\b", bare) else \
                    (TP, "$.ajax without dataType (jQuery < 3.0 guesses the type; version not verified)", ctx.ev(a, z))
-        has = re.search(r"\b(?:success|error|complete)\s*:|\.(?:done|fail|always|then)\s*\(", " ".join(ctx.bare[n - 1:n + 30]))
-        return (FP, "A success/error/complete (or done/fail/always) callback is provided", ctx.ev(a, z)) if has else \
-               (TP, "$.ajax without any success/error/complete or done/fail/always callback", ctx.ev(a, z))
+        end = z
+        while end < len(ctx.bare) and ctx.bare[end].strip().startswith("."):        # method chain on following lines
+            end += 1
+        chain = " ".join(ctx.bare[a - 1:end])
+        if re.search(r"\berror\s*:|\.fail\s*\(|\.always\s*\(|\bcomplete\s*:|\.catch\s*\(", chain):
+            return FP, "An error-side handler (error / fail / always / complete / catch) is provided", ctx.ev(a, end)
+        if re.search(r"\bsuccess\s*:|\.done\s*\(|\.then\s*\(", chain):
+            return TP, "Only a success handler (success / done) is provided: failures are silent", ctx.ev(a, end)
+        return TP, "$.ajax without any success/error/complete or done/fail/always callback", ctx.ev(a, end)
     return chk
 
 
@@ -628,7 +636,28 @@ def chk_empty_ajax_error(ctx, n):                                    # 1020342
     t = " ".join(ctx.bare[n - 1:n + 4])
     if re.search(r"\b(?:error\s*:\s*function\s*\([^)]*\)|\.fail\s*\(\s*function\s*\([^)]*\))\s*\{\s*\}|\berror\s*:\s*\([^)]*\)\s*=>\s*\{\s*\}", t):
         return TP, "Empty ajax error/fail handler: failures are silently ignored", _ev(ctx, n, n + 3)
-    return FP, "No empty ajax error/fail handler at the reported line", _ev(ctx, n, n + 3)
+    return RV, "No empty ajax error/fail handler at the reported line", _ev(ctx, n, n + 3)
+
+
+def chk_css_many(ctx, n):                                            # 1020314
+    if not ctx.ok(n):
+        return NOLINE
+    line = ctx.code[n - 1]
+    if re.search(r"(?:\$|jQuery)\s*\(\s*[\"'][^\"'#]*[.*][^\"']*[\"']\s*\)\s*\.\s*css\s*\(", line):
+        return TP, "css() on a selection built from a class/universal selector (many elements)", _ev(ctx, n)
+    m = re.search(r"([\w$]+)\s*\.\s*css\s*\(", ctx.bare[n - 1])
+    if not m:
+        return RV, "No css() call at the reported line", _ev(ctx, n)
+    from sapui5_checkers import assigned_value
+    val, ln = assigned_value(ctx, m.group(1), n, 40)
+    sel = re.match(r"\s*(?:\$|jQuery)\s*\(\s*[\"']([^\"']*)[\"']", val or "")
+    if not sel:
+        return RV, f"css() on '{m.group(1)}': the jQuery selection it holds is not visible", _ev(ctx, n)
+    if sel.group(1).strip().startswith("#") and " " not in sel.group(1).strip():
+        return FP, f"'{m.group(1)}' holds an ID selection (a single element, line {ln})", _ev(ln, n) if False else _ev(ctx, n)
+    if re.search(r"[.*]", sel.group(1)):
+        return TP, f"css() on '{m.group(1)}', a selection from the class/universal selector \"{sel.group(1)[:50]}\" (line {ln}): many elements", _ev(ctx, n)
+    return RV, f"css() on '{m.group(1)}' holding the selector \"{sel.group(1)[:50]}\": size of the selection unknown", _ev(ctx, n)
 
 
 def chk_delete_array(ctx, n):                                        # 1020054
@@ -637,7 +666,7 @@ def chk_delete_array(ctx, n):                                        # 1020054
     b = ctx.bare[n - 1]
     m = re.search(r"\bdelete\s+([\w$.]+)\s*\[\s*([^\]]*)\]", b)
     if not m:
-        return FP, "No delete of an indexed element at the reported line", _ev(ctx, n)
+        return RV, "No delete of an indexed element at the reported line", _ev(ctx, n)
     if re.fullmatch(r"\d+", m.group(2).strip()) or re.search(r"(?i)arr|list|items|array|\[\]", m.group(1)):
         return TP, "delete on an array element leaves a hole; use splice()", _ev(ctx, n)
     return RV, "delete obj[key]: cannot tell whether the target is an array or an object", _ev(ctx, n)
@@ -647,7 +676,7 @@ def chk_ui5_attach(ctx, n):                                          # 1020154
     if not ctx.ok(n):
         return NOLINE
     if not re.search(r"\.attachEvent\s*\(", ctx.bare[n - 1]):
-        return FP, "No attachEvent call at the reported line", _ev(ctx, n)
+        return RV, "No attachEvent call at the reported line", _ev(ctx, n)
     if re.search(r"sap\.ui\.define|sap\.ui\.require", "\n".join(ctx.code)):
         return RV, "attachEvent is also the SAPUI5 framework API: confirm the receiver is a DOM element", _ev(ctx, n)
     return TP, "IE-only attachEvent: use addEventListener", _ev(ctx, n)
@@ -819,8 +848,8 @@ reg(1020302, "Avoid using element type in jQuery", lit(r"(?:\$|jQuery)\s*\(\s*[\
 reg(1020306, "Always use find for Id->Child nested selectors", lit(r"(?:\$|jQuery)\s*\(\s*[\"']#[\w-]+\s+[.#\w]", "ID followed by a descendant selector"))
 reg(1020308, "Always cache the returned objects in variables to be reused", chk_jquery_dup_selector)
 reg(1020310, 'Use "type=" to select elements by type', lit(r"(?:\$|jQuery)\s*\(\s*[\"'][^\"']*:(?:text|password|checkbox|radio|submit|button|file|image|reset|hidden)\b", "jQuery :type selector"))
-reg(1020312, "Avoid use of anonymous functions to attach events", K(r"\.\s*(?:on|bind|click|change|submit|keyup|keydown|hover|focus|blur|mouseover|mouseout)\s*\(\s*(?:[^,()]*,\s*)?function\s*\(", "anonymous event handler"))
-reg(1020314, "Avoid using css() of many elements", lit(r"(?:\$|jQuery)\s*\(\s*[\"'][^\"'#]*[.*][^\"']*[\"']\s*\)\s*\.\s*css\s*\(", "css() on a class/universal selection"))
+reg(1020312, "Avoid use of anonymous functions to attach events", K(r"\.\s*(?:on|bind|click|change|submit|keyup|keydown|hover|focus|blur|mouseover|mouseout)\s*\((?:[^()]|\([^()]*\))*?(?:function\s*\(|\([^()]*\)\s*=>|[\w$]+\s*=>)", "anonymous event handler"))
+reg(1020314, "Avoid using css() of many elements", chk_css_many)
 reg(1020316, "Avoid Universal Selectors", lit(r"(?:\$|jQuery)\s*\(\s*[\"'][^\"']*\*[^\"']*[\"']", "universal selector"))
 reg(1020318, "Avoid using jQuery deprecated methods", K(r"\.\s*(?:live|die|andSelf|size)\s*\(|\$\s*\.\s*browser\b", "deprecated jQuery method"))
 reg(1020344, "Avoid using jQuery 3.x deprecated methods", K(r"\.\s*(?:bind|unbind|delegate|undelegate|size)\s*\(|(?:\$|jQuery)\s*\.\s*(?:isArray|isFunction|isNumeric|isWindow|parseJSON|trim|type|now|proxy)\s*\(", "jQuery 3 deprecated method"))

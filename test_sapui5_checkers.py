@@ -10,13 +10,13 @@ CASES = [
     ("1020600", "js", "sap.ui.define(['jquery.sap.global'], function(jQuery){});", 1, TP),
     ("1020600", "js", "// jQuery.sap.require('x');\nvar a = 1;", 1, FP),
     ("1020600", "js", "var s = 'jQuery.sap.log';", 1, FP),
-    ("1020600", "js", "var a = 1;", 1, FP),
+    ("1020600", "js", "var a = 1;", 1, RV),
     ("1020602", "js", "var m = new sap.ui.model.odata.ODataModel('/svc');", 1, TP),
     ("1020602", "js", "sap.ui.define(['sap/ui/model/odata/ODataModel'], function(M){});", 1, TP),
-    ("1020602", "js", "sap.ui.define(['sap/ui/model/odata/v2/ODataModel'], function(M){});", 1, FP),
+    ("1020602", "js", "sap.ui.define(['sap/ui/model/odata/v2/ODataModel'], function(M){});", 1, RV),
     ("1020602", "json", '{"sap.ui5":{"models":{"":{"type":"sap.ui.model.odata.ODataModel"}}}}', 1, TP),
     ("1020618", "js", "var s = jQuery.sap.storage(jQuery.sap.storage.Type.local);", 1, TP),
-    ("1020618", "js", "var s = jQuery.sap.storage(jQuery.sap.storage.Type.session);", 1, FP),
+    ("1020618", "js", "var s = jQuery.sap.storage(jQuery.sap.storage.Type.session);", 1, RV),
     ("1020614", "js", "console.log('x');", 1, TP),
     ("1020614", "js", "console.error('x');", 1, RV),
     ("1020614", "js", "/* console.log('x'); */\nvar a;", 1, FP),
@@ -43,8 +43,8 @@ CASES = [
     ("1020608", "js", "var c = sap.ui.getCore().byId('myBtn');", 1, TP),
     ("1020608", "js", DEF + "var b = new Button('btn1', {text: 'x'});", 2, TP),
     ("1020608", "js", DEF + "var b = new Button({id: 'btn1', text: 'x'});", 2, TP),
-    ("1020608", "js", DEF + "var b = new Button({text: 'x'});", 2, FP),
-    ("1020608", "js", DEF + "var m = new JSONModel('data.json');", 2, FP),
+    ("1020608", "js", DEF + "var b = new Button({text: 'x'});", 2, RV),
+    ("1020608", "js", DEF + "var m = new JSONModel('data.json');", 2, RV),
     ("1020608", "js", "var c = this.byId('myBtn');", 1, FP),
     ("1020608", "js", "var c = document.getElementById('x');", 1, TP),
     # duplicate OData model
@@ -58,7 +58,7 @@ CASES = [
     ("1020612", "js", DEF + "MyClass.prototype.foo = function() {};", 2, FP),
     ("1020612", "js", DEF + "var b = new Button();\nb.onclick = function() {};", 3, TP),
     ("1020612", "js", DEF + "var b = new Date();\nb.foo = function() {};", 3, FP),
-    ("1020612", "js", "var a = 1;", 1, FP),
+    ("1020612", "js", "var a = 1;", 1, RV),
     # CRUD keys
     ("1020616", "js", "oModel.update(\"/Products('\" + sId + \"')\", oData);", 1, TP),
     ("1020616", "js", "oModel.update(oModel.createKey('/Products', {Id: 1}), oData);", 1, FP),
@@ -67,6 +67,10 @@ CASES = [
     ("1020616", "js", "oModel.create('/Products', oData);", 1, FP),
     ("1020616", "js", "var sPath = oCtx.getPath();\noModel.update(sPath, oData);", 2, FP),
     ("1020616", "js", "aList.remove(x);", 1, RV),
+    # --- regression tests from real code -----------------------------------------------------------------
+    ("1020612", "js", "var inputId = this.byId('x');\ninputId.onfocusout = () => {\n  inputId.setValueState('None');\n};", 2, TP),
+    ("1020612", "js", "var reader = new FileReader();\nreader.onload = function() {};", 2, FP),
+    ("1020612", "js", "var oItem = {};\noData.results.map(function (obj) {\n  var reader = new FileReader();\n  reader.onload = function() {};\n});", 1, RV),
 ]
 
 

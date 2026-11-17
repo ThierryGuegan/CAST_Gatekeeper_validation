@@ -23,15 +23,21 @@ def violation(n, comp, with_findings=True):
 # rule 7544: 3 violations (paging test uses nbRows=2); rule 1020060: 1 violation without findings; rule 7520: none
 VIOLATIONS = {"7544": [violation(1, "ZPROG"), violation(2, "ZPROG2"), violation(3, "ZPROG3")],
               "1020060": [violation(4, "main.js", with_findings=False)], "7520": []}
-FINDINGS = {  # component id -> JSON (shape guessed: bookmarks with file + startLine)
-    1: {"name": "Diagnosis Findings", "values": [{"component": {"name": "ZPROG"}, "bookmarks": [
-        {"file": {"name": "abap/zprog.abap", "href": "x/1"}, "startLine": 1, "endLine": 1}]}]},
-    2: {"name": "Diagnosis Findings", "bookmarks": [{"file": {"name": "abap/zprog.abap"}, "startLine": 2},
-                                                    {"file": {"name": "abap/zprog.abap"}, "startLine": 2}]},
+ABAP_SRC = "SELECT SINGLE * FROM mara INTO ls WHERE matnr = p.\nSELECT * FROM mara INTO ls.\n  WRITE ls.\nENDSELECT.\n"
+JS_SRC = 'var a = 1;\nconsole.log(1);\n'
+FILES = {"D:\\deploy\\APP\\abap\\zprog.abap": (f"{D}/local-sites/9/file-contents/100", ABAP_SRC),
+         "D:\\deploy\\APP\\web\\main.js": (f"{D}/local-sites/9/file-contents/101", JS_SRC)}
+ABAP_F = {"name": "D:\\deploy\\APP\\abap\\zprog.abap", "href": f"{D}/local-sites/9/file-contents/100"}   # Windows path, like the real server
+JS_F = {"name": "D:\\deploy\\APP\\web\\main.js", "href": f"{D}/local-sites/9/file-contents/101"}
+FINDINGS = {  # real shape: bookmarks = list of lists of {component, codeFragment{file, startLine}}
+    1: {"name": "Number of violation occurrences", "type": "integer", "values": [1], "bookmarks": [[
+        {"component": {"name": "ZPROG"}, "codeFragment": {"file": ABAP_F, "startLine": 1, "endLine": 1}}]]},
+    2: {"name": "Diagnosis Findings", "bookmarks": [[{"codeFragment": {"file": ABAP_F, "startLine": 2}}],
+                                                    [{"codeFragment": {"file": ABAP_F, "startLine": 2}}]]},
     3: {"name": "Diagnosis Findings", "values": []},          # no location in the findings -> falls back to source-codes
 }
-SOURCES = {3: [{"file": {"name": "abap/zprog.abap"}, "startLine": 2, "endLine": 4}],
-           4: [{"file": {"name": "web/main.js"}, "startLine": 2}]}
+SOURCES = {3: [{"file": ABAP_F, "startLine": 2, "endLine": 4}],
+           4: [{"file": JS_F, "startLine": 2}]}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -62,6 +68,12 @@ class Handler(BaseHTTPRequestHandler):
             allv = VIOLATIONS.get(q.get("rule-pattern"), [])
             s, n = int(q.get("startRow", 1)), int(q.get("nbRows", 10))
             return self.reply(200, allv[s - 1:s - 1 + n])
+        for name, (href, text) in FILES.items():
+            if p == "/rest/" + href:
+                body = text.encode()
+                self.send_response(200); self.send_header("Content-Type", "text/plain")
+                self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
+                return
         parts = p.split("/")                       # /rest/AAD/components/<id>/snapshots/6/<findings/7544|source-codes>
         if len(parts) > 5 and parts[3] == "components":
             cid = int(parts[4])
@@ -115,8 +127,13 @@ def main():
     check("paging uses startRow/nbRows", [(q["startRow"], q["nbRows"]) for p, q in REQUESTS] == [("1", "2"), ("3", "2")], REQUESTS)
     check("rule-pattern parameter sent", all(q["rule-pattern"] == "7544" for p, q in REQUESTS))
     check("limit respected", len(list(c.iter_violations(snap, "7544", limit=1))) == 1)
-    check("locations from findings, deduplicated", c.locations(got[1]) == [("abap/zprog.abap", 2)], c.locations(got[1]))
-    check("fallback to source-codes", c.locations(got[2]) == [("abap/zprog.abap", 2)], c.locations(got[2]))
+    f100 = f"{D}/local-sites/9/file-contents/100"
+    p = "D:\\deploy\\APP\\abap\\zprog.abap"
+    check("locations from findings, deduplicated", c.locations(got[1]) == [(p, 2, f100)], c.locations(got[1]))
+    check("fallback to source-codes", c.locations(got[2]) == [(p, 2, f100)], c.locations(got[2]))
+    d = c.download(f100, p)
+    check("download keeps the extension and content", d.endswith(".abap") and open(d).read() == ABAP_SRC, d)
+    check("download is cached", c.download(f100, p) == d)
     check("no location -> empty", c.locations(violation(9, "none", with_findings=False)) == [])
     k = dr.DashboardClient(base, D, api_key="k3y", api_user="bob")
     check("api-key authentication", k.find_application("MyApp")["name"] == "MyApp")
@@ -136,7 +153,7 @@ def main():
     # --- end to end through the CLI
     out = tmp / "report.csv"
     common = ["--rest-url", base, "--domain", D, "--user", "bob", "--password", "pw", "--app", "MyApp",
-              "--source-root", str(src), "--out", str(out)]
+              "--out", str(out)]                     # no --source-root: the source comes from the server
     text, code = run(common + ["--rule-ids", "7544,1020060,7520"])
     rows = list(csv.DictReader(open(out, encoding="utf-8-sig")))
     got = sorted((r["rule"], r["line"], r["verdict"], r["object"]) for r in rows)
@@ -153,16 +170,25 @@ def main():
     text, _ = run(common + ["--rule-ids", "7544", "--snapshot", "1"])
     check("--snapshot number", "snapshot 1" in text, text)
 
+    saved = dict(FILES); FILES.clear()                    # server stops serving files -> local --source-root is the fallback
+    text, _ = run(common + ["--rule-ids", "1020060", "--source-root", str(src)])
+    rows = list(csv.DictReader(open(out, encoding="utf-8-sig")))
+    check("fallback to --source-root when the download fails", [r["verdict"] for r in rows] == ["TRUE_POSITIVE"], (rows, text))
+    text, _ = run(common + ["--rule-ids", "1020060"])
+    rows = list(csv.DictReader(open(out, encoding="utf-8-sig")))
+    check("no download and no --source-root -> REVIEW", [r["verdict"] for r in rows] == ["REVIEW"] and "not available" in rows[0]["reason"], (rows, text))
+    FILES.update(saved)
+
     text, code = run(common + ["--rule-ids", "7544", "--dump"])
     check("--dump prints the violation, findings and source-codes", '"violation"' in text and '"findings"' in text and "7544" in text, text)
 
     for argv, frag, name in [
-        (["--rest-url", base, "--domain", D, "--user", "bob", "--password", "pw", "--app", "Nope", "--source-root", str(src)], "Available: MyApp", "unknown app"),
-        (["--rest-url", base, "--domain", D, "--user", "bob", "--password", "bad", "--app", "MyApp", "--source-root", str(src)], "check the credentials", "bad password"),
+        (["--rest-url", base, "--domain", D, "--user", "bob", "--password", "pw", "--app", "Nope"], "Available: MyApp", "unknown app"),
+        (["--rest-url", base, "--domain", D, "--user", "bob", "--password", "bad", "--app", "MyApp"], "check the credentials", "bad password"),
     ]:
         text, code = run(argv)
         check(f"CLI error: {name}", code != 0 and frag in text and "Traceback" not in text, text)
-    text, code = run(["--rest-url", base, "--user", "bob", "--source-root", str(src), "--app", "MyApp"])
+    text, code = run(["--rest-url", base, "--user", "bob", "--app", "MyApp"])
     check("--domain required", code == 2)
     text, code = run(common + ["--apply-exclusions"])
     check("--apply-exclusions refused in REST mode", code == 2)
