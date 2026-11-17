@@ -4,15 +4,26 @@ Triage CAST Imaging **Gatekeeper** violations as true or false positives, automa
 
 For each selected quality rule the tool
 
-1. gets the violations from the Gatekeeper MCP server (`get_violations`), or **from the CAST Dashboard REST API**
-   (`--rest-url`, for Imaging versions that cannot run the MCP server), or from an exported CSV/JSON file (`--input`),
-2. reads the source file at the reported line from a local checkout,
+1. gets the violations from the **CAST Dashboard REST API** (Imaging before 3.6.4), from the **Gatekeeper MCP server**
+   (Imaging 3.6.4 or later), or from an exported CSV/JSON file,
+2. gets the source file at the reported line (downloaded from the server in REST mode, otherwise from a local
+   checkout),
 3. runs the rule's checker and classifies the violation,
 4. writes a CSV report with the reason, the evidence and a ready-to-use justification,
-5. optionally creates the exclusions in Imaging for the false positives.
+5. optionally creates the exclusions in Imaging for the false positives (MCP mode only).
 
-It builds on the [CAST Gatekeeper MCP server](https://doc.castsoftware.com/imaging/mcp-server/gatekeeper/windows/)
+It covers ABAP, SAPUI5, JavaScript/TypeScript (jQuery, Angular, React, Vue, Node.js), HTML/CSS and SQL (PL/SQL, T-SQL,
+COBOL embedded SQL). The MCP mode builds on the
+[CAST Gatekeeper MCP server](https://doc.castsoftware.com/imaging/mcp-server/gatekeeper/windows/)
 (tools `get_violations` and `manage_exclusion`).
+
+## Which mode?
+
+| Your situation | Use | Source files | Exclusions |
+|---|---|---|---|
+| Imaging **before 3.6.4** (e.g. 2.x) with the Dashboard REST API | `--rest-url` ([details](#without-the-mcp-server-imaging-before-364-cast-dashboard-rest-api)) | downloaded from the server | create them yourself from the report |
+| Imaging **3.6.4 or later** with the Gatekeeper MCP server | `--url` ([Quick start](#quick-start)) | local checkout (`--source-root`) | `--apply-exclusions` |
+| Neither is reachable from your machine | `--input` ([offline](#offline-alternative-an-export-file)) | local checkout (`--source-root`) | create them yourself from the report |
 
 > **Status:** the checkers are covered by unit tests. The **REST API mode has been run against a real CAST
 > Dashboard server** and the checkers were calibrated on its violations (see the notes below). The **MCP mode has
@@ -82,7 +93,11 @@ SQL), so for those the **file extension** decides:
 | `.html .htm .vue .cshtml .jsp` | markup |
 | `.xml` | markup |
 | `.css .scss .less` | CSS |
+| `.abap` | ABAP. SQL-analyzer rules that fire on an ABAP file (embedded Open SQL, AMDP SQLScript) are `REVIEW` only |
 | anything else | JavaScript/TypeScript for `sapui5`/`web` rules, ABAP for `abap` rules |
+
+Inside an **AMDP method** (`METHOD ... BY DATABASE PROCEDURE ... ENDMETHOD`, whose body is SQLScript, not ABAP) every
+ABAP verdict is downgraded to `REVIEW`, because ABAP statement parsing does not apply there.
 
 ## Installation
 
@@ -130,8 +145,23 @@ server's own port.
 `imaging` in the URL with your Imaging host name. Connection or authentication errors are printed as a short
 message; set `GATEKEEPER_DEBUG=1` for the full traceback.
 
-`--source-root` must contain every source language you want checked (ABAP, SQL, JS, …). The reported path is
-matched under that root; if it does not match exactly, the candidate sharing the longest trailing path is used.
+`--source-root` (MCP and `--input` modes) must contain every source language you want checked (ABAP, SQL, JS, …).
+The reported path is matched under that root; if it does not match exactly, the candidate sharing the longest
+trailing path is used.
+
+### A `run.bat` for Windows
+
+Keep the command in a batch file, and keep the password **out of it** (the file is usually committed). This version
+asks for the password unless `CAST_REST_PASSWORD` is already set:
+
+```bat
+@echo off
+cd /d "%~dp0"
+if "%CAST_REST_PASSWORD%"=="" set /p CAST_REST_PASSWORD=Password: 
+python gatekeeper_validate.py --rest-url http://<server>:<port>/<webservice>/rest --domain <domain> --user <user> --app "<application name>" --rule-ids auto --limit 50 --out report.csv
+```
+
+`set /p` echoes what you type; run `set CAST_REST_PASSWORD=...` once in your console to avoid that.
 
 ## Without the MCP server (Imaging before 3.6.4): CAST Dashboard REST API
 
@@ -195,15 +225,20 @@ and the `get_violations` shape are accepted, and `--dump` shows how your columns
 | `--rest-url`, `--domain`, `--user`/`--password` or `--api-key`/`--api-user`, `--app` | CAST Dashboard REST API mode (see above); `--source-root` is optional there. |
 | `--input FILE` | Read the violations from a CSV/JSON export; only `--source-root` is then required. |
 | `--rule-ids` | `auto` (default: every rule with a checker), `abap`, `sapui5`, `web`, `sql`, `all` (auto + review-only), or a comma list such as `7520,1020600,1101114`. |
-| `--snapshot` | `latest` (default), a snapshot number, or `5,6` (as accepted by `get_violations`). |
-| `--limit N` | Check only the first **N violations overall**; rules are processed in order and the run stops at N. |
+| `--snapshot` | `latest` (default) or a snapshot number; in MCP mode also `5,6` (as accepted by `get_violations`). |
+| `--limit N` | Check only the first **N violations overall** (in REST mode: N source locations); rules are processed in order and the run stops at N. |
 | `--per-rule-limit N` | Check only the first **N violations per rule**. |
-| `--apply-exclusions` | Create an exclusion (`manage_exclusion`, `add`) for every `FALSE_POSITIVE`. The justification and evidence become the comment (truncated to 900 characters). Default is a dry run. |
+| `--apply-exclusions` | **MCP mode only.** Create an exclusion (`manage_exclusion`, `add`) for every `FALSE_POSITIVE`. The justification and evidence become the comment (truncated to 900 characters). Default is a dry run. |
 | `--out` | CSV file, default `report.csv`. |
-| `--dump` | Print the raw `get_violations` payload and stop. |
+| `--dump` | Print the raw payload and stop: `get_violations` (MCP), or a violation with its findings and source codes (REST), or how an export file's columns were read (`--input`). |
 | `--list-rules` | List the supported rules and exit. |
 
-The API requires `nb_rows` ≥ 10, so with `--limit` below 10 the tool fetches 10 and checks only the first N.
+The MCP API requires `nb_rows` ≥ 10, so with `--limit` below 10 the tool fetches 10 and checks only the first N.
+
+**Run time.** Every rule costs one request, and every violation one or two more (its findings, then the file the
+first time it is seen). `--rule-ids auto` covers more than 300 rules and can take a quarter of an hour or more
+against a remote server: start with `--limit` or `--per-rule-limit`, or pick a family (`abap`, `sapui5`, `web`,
+`sql`) or a list of rule ids.
 
 ## Report
 
@@ -214,18 +249,41 @@ The API requires `nb_rows` ≥ 10, so with `--limit` below 10 the tool fetches 1
 | `rule`, `rule_name` | Rule id and name. |
 | `object`, `file`, `line` | Where Imaging reported it. |
 | `verdict` | `TRUE_POSITIVE`, `FALSE_POSITIVE` or `REVIEW`. |
-| `reason` | Why the checker decided so. |
+| `reason` | Why the checker decided so. For a `REVIEW` caused by "construct not found", the text says that CAST reported this line and it is either a line-anchoring difference or a limit of the checker. |
 | `evidence` | The statement(s) the decision is based on. |
 | `justification` | Filled for false positives only: `[rule] reason`. |
-| `excluded` | `yes` when `--apply-exclusions` created the exclusion, `no (missing href)` when the payload had no hrefs. |
+| `excluded` | MCP mode: `yes` when `--apply-exclusions` created the exclusion, `no (missing href)` when the payload had no hrefs. Empty otherwise. |
 
 A summary and the list of false positives are also printed to the console.
+
+The `evidence` column holds **excerpts of your source code**: treat `report.csv` as confidential and do not commit it
+(it is in `.gitignore`).
+
+A practical way to read it: filter on `FALSE_POSITIVE` and check a sample against the code, then look at `REVIEW`
+(sort by `rule`), and treat `TRUE_POSITIVE` as confirmed.
+
+## Troubleshooting
+
+| Symptom | Cause and fix |
+|---|---|
+| `ImportError: cannot import name 'streamablehttp_client'` | Old runner with `mcp` 2.x: update (`git pull`); both SDK generations are supported. |
+| `ConnectError: [Errno 11001] getaddrinfo failed` | The host name in `--url` / `--rest-url` does not resolve: you are still using the placeholder (`imaging`, `<server>`). Use the real host. |
+| `HTTP 401 ... check the credentials` | Wrong user/password or API key. In Windows `cmd`, `$VAR` is **not** expanded: use `%VAR%`. In REST mode the password comes from `--password` or `CAST_REST_PASSWORD`. |
+| `HTTP 404 ... check --rest-url and --domain` | `--rest-url` must end with the server's `/rest` root (opening it in a browser lists the domains) and `--domain` must be one of them. |
+| `HTTP 403` | The user has no access to that domain or application. |
+| `Application 'X' not found ... Available: ...` | `--app` is matched on the exact name (case-insensitive); the message lists the available ones. |
+| No violations for a rule in REST mode | Use the **engineering** domain (e.g. `AED` / `CENTRAL`), not a measurement-only one (e.g. `AAD`). Run with `--rule-ids <id> --dump` to see what the server returns. |
+| Many `REVIEW` rows saying "CAST reported this line" | The construct is not at the reported line: a line-anchoring difference or a checker limit. Look at the `evidence` column; if a pattern repeats, it is a candidate for a checker fix. |
+| `REVIEW` "Inside an AMDP method" / "SQL rule on an ABAP file" | SQLScript or embedded SQL inside ABAP is not parsed: review those by hand. |
+| `Checker error: ...` in `reason` | A checker bug on an unusual construct: the run continues, the row is `REVIEW`. Please report the rule id and file. |
+| Full traceback needed | Set `GATEKEEPER_DEBUG=1`. |
 
 ## How it works
 
 ```
-gatekeeper_validate.py        runner: MCP client, rule selection, limits, CSV, exclusions, routing
-├── abap_checkers.py          ABAP statement parser + 72 rule ids
+gatekeeper_validate.py        runner: input modes (REST / MCP / file), rule selection, limits, CSV, exclusions, routing
+├── dashboard_rest.py         CAST Dashboard REST API client (applications, snapshots, violations, locations, source download)
+├── abap_checkers.py          ABAP statement parser (+ AMDP detection) + 72 rule ids
 ├── sapui5_checkers.py        JsCtx (JS/JSON/HTML/CSS aware of comments and strings) + SAPUI5 rules
 ├── web_checkers.py           TG004 rules (brace/loop/try/switch/finally aware, cookies, Node, Angular, Vue, jQuery, CSS)
 └── sql_checkers.py           SQL statement splitter, FROM/JOIN parser, PL/SQL & T-SQL loops, tables/keys
@@ -248,10 +306,14 @@ context per source file.
    reg(1020999, "Avoid using foo()", keyword(r"\bfoo\s*\(", "foo()"))
    ```
 
-   `keyword()` handles the common case: the pattern is matched on code only, so a match inside a comment or a
-   string literal becomes a justified `FALSE_POSITIVE`. Use `lit()` when the pattern needs string content.
-2. Add at least one true-positive and one false-positive case to the matching `test_*_checkers.py`.
-3. Run the tests (below).
+   `keyword()` handles the common case: the pattern is matched on code only (comments blanked, string literals
+   masked), so a match inside a comment or a string literal becomes a justified `FALSE_POSITIVE`. Use `lit()` (web,
+   SAPUI5) or `literals=True` (ABAP) when the pattern needs string content.
+2. Follow the verdict rules: **`FALSE_POSITIVE` only when the file proves it.** If the construct is simply not found
+   at the reported line, return `REVIEW`: CAST anchors lines approximately.
+3. Add at least one true-positive and one false-positive case to the matching `test_*_checkers.py`. Cases built from
+   real violations are the most valuable ones: keep them free of customer identifiers.
+4. Run the tests (below).
 
 A checker error never stops a batch: it is caught and reported as `REVIEW` with `Checker error: …`.
 
@@ -274,12 +336,17 @@ python test_dashboard_rest.py     # starts a fake REST server on localhost
   `REVIEW`, or as `TRUE_POSITIVE` with the caveat in the reason (e.g. an authorization check performed in a caller).
 - **Rule semantics are inferred from rule names**, since CAST publishes no rule descriptions. Several rules (e.g.
   SAPUI5 hard-coded IDs, unnamed OData model, async loading) are interpretations; ambiguous cases return `REVIEW`.
-- **Line anchoring** (which line Imaging reports for each rule) is unverified. Checkers search the nearby
-  statements and return `REVIEW` when the code is not what the rule expects, which usually means the checkout does
-  not match the analyzed version.
-- **REST API / export files:** the tool trusts the file path and line in the export; if the checkout differs from the analyzed
-  version, results are `REVIEW`.
-- **ABAP:** chained `:` statements are kept as one statement; CDS source is not handled.
+- **Line anchoring is approximate on CAST's side**: it can report the line of the statement before, the comment
+  banner above a `FORM`, or an `AT` event inside a loop. The checkers tolerate the cases seen so far and return
+  `REVIEW` when the code at the line is not what the rule expects; that is never treated as proof of a false
+  positive.
+- **REST mode:** verified against one server version (CAST Dashboard REST API 8.3.50) and one application. The quality
+  rule id is passed as the API's `rule-pattern`, and violation lines are read from the findings. The file path in the
+  report is the server's (often an absolute Windows path); the checker uses the downloaded copy, so a local checkout
+  can differ without consequence. `--input` trusts the file and line of the export.
+- **MCP mode** has not been run against a real Gatekeeper MCP server.
+- **ABAP:** chained `:` statements are kept as one statement; CDS source is not handled; AMDP (SQLScript) bodies are not
+  parsed (verdicts there are `REVIEW`).
 - **SQL:** statements are split on `;`, blank lines and `GO`; T-SQL without any of them can merge neighbouring
   statements. Joins and aliases are analysed for the first top-level `FROM` of a statement only.
 - **JavaScript/TypeScript:** regular-expression literals containing quotes or braces can confuse the comment/string
