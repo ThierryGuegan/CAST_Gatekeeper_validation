@@ -119,7 +119,7 @@ def _no_match(w, label):
         return FP, f"{label} appears only inside a string literal, not as code"
     if w == "comment":
         return FP, f"{label} appears only in a comment"
-    return FP, f"No {label} at the reported line (source may differ from the analyzed version)"
+    return RV, f"No {label} at the reported line (source may differ from the analyzed version)"
 
 
 def keyword(rx_bare, label, rx_str=None):
@@ -292,7 +292,7 @@ def chk_hardcoded_id(ctx, n):
         return TP, "Hard-coded control ID: " + "; ".join(hits), ctx.ev(a, z)
     if re.search(r"(?:this|oView|that|_this)\s*\.\s*(?:getView\(\)\s*\.\s*)?byId\s*\(|\.createId\s*\(", bare):
         return FP, "View-scoped lookup (byId / createId): the ID is prefixed by the view ID, so it is not a global hard-coded ID", ctx.ev(a, z)
-    return FP, "No hard-coded control ID pattern at the reported line (source may differ from the analyzed version)", ctx.ev(a, z)
+    return RV, "No hard-coded control ID pattern at the reported line (source may differ from the analyzed version)", ctx.ev(a, z)
 
 
 # ---- 1020610 Same OData model declared twice ----------------------------------------------------
@@ -346,9 +346,12 @@ def chk_override(ctx, n):
         if root == "sap" or al.get(root, "").startswith("sap/"):
             return TP, f"{m.group(1)}.prototype.{m.group(2)} is overwritten on a UI5 class", ctx.ev(a, z)
         return FP, f"{m.group(1)}.prototype.{m.group(2)} belongs to the application's own class, not a UI5 control", ctx.ev(a, z)
-    im = re.search(r"(?<![\w$.])([A-Za-z_$][\w$]*)\.([\w$]+)\s*=\s*function", bare)
+    line_b = ctx.bare[n - 1]                       # the reported line only: a multi-line span would pick up unrelated code
+    im = re.search(r"(?<![\w$.])([A-Za-z_$][\w$]*)\.([\w$]+)\s*=\s*(?:async\s+)?(?:function\b|\([^)]*\)\s*=>|[\w$]+\s*=>)", line_b)
     if im:
         val, _ = assigned_value(ctx, im.group(1), n, 40)
+        if val and re.search(r"\bbyId\s*\(|getCore\(\)\s*\.\s*byId|\.getControl\s*\(", val):
+            return TP, f"Method {im.group(2)} is added/overridden on the UI5 control {im.group(1)} (obtained with byId)", ctx.ev(a, z)
         cls = re.match(r"\s*new\s+([\w$.]+)", val or "")
         if cls:
             c = cls.group(1)
@@ -356,7 +359,7 @@ def chk_override(ctx, n):
                 return TP, f"Method {im.group(2)} is added/overridden on the control instance {im.group(1)} ({c})", ctx.ev(a, z)
             return FP, f"{im.group(1)} is an instance of {c}, not a UI5 control", ctx.ev(a, z)
         return RV, f"Cannot tell whether '{im.group(1)}' is a UI5 control", ctx.ev(a, z)
-    return FP, "No prototype or instance method assignment at the reported line", ctx.ev(a, z)
+    return RV, "No prototype or instance method assignment at the reported line", ctx.ev(a, z)
 
 
 # ---- 1020616 Create keys for CRUD statements ----------------------------------------------------

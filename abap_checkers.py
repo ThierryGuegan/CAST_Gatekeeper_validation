@@ -17,7 +17,7 @@ from collections import namedtuple
 
 TP, FP, RV = "TRUE_POSITIVE", "FALSE_POSITIVE", "REVIEW"
 NOSTMT = (RV, "No statement at the reported line (the source may differ from the analyzed version)", "")
-S = namedtuple("S", "first last text up")
+S = namedtuple("S", "first last text up bare")   # bare = upper-case text with literal contents masked
 Span = namedtuple("Span", "kind start end")
 
 SEL = re.compile(r"^SELECT(?![\w-])")
@@ -54,31 +54,39 @@ def strip_comment(line):
 
 def parse(lines):
     """ABAP statements: end at '.' outside literals. Chained ':' statements are kept as one."""
-    out, buf, first = [], [], None
+    out, buf, bufm, first = [], [], [], None
     for i, line in enumerate(lines):
         code = strip_comment(line.rstrip("\r\n"))
-        quote, cur = None, []
+        quote, cur, curm = None, [], []
         for k, ch in enumerate(code):
             if quote:
                 cur.append(ch)
                 if ch == quote:
                     quote = None
+                    curm.append(ch)
+                else:
+                    curm.append("_")
             elif ch in "'`|":
                 quote = ch
                 cur.append(ch)
+                curm.append(ch)
             elif ch == "." and (k + 1 == len(code) or code[k + 1] in " \t"):
                 buf.append("".join(cur))
-                cur = []
+                bufm.append("".join(curm))
+                cur, curm = [], []
                 text = " ".join(" ".join(buf).split())
+                masked = " ".join(" ".join(bufm).split())
                 if text:
-                    out.append(S(first or i + 1, i + 1, text, text.upper()))
-                buf, first = [], None
+                    out.append(S(first or i + 1, i + 1, text, text.upper(), masked.upper()))
+                buf, bufm, first = [], [], None
             else:
                 cur.append(ch)
+                curm.append(ch)
         rest = "".join(cur).strip()
         if rest:
             first = first or i + 1
             buf.append(rest)
+            bufm.append("".join(curm).strip())
     return out
 
 
@@ -122,7 +130,7 @@ class Ctx:
         k = bisect_right(self._starts, n) - 1
         if k >= 0 and self.stmts[k].last >= n:
             return k
-        if k + 1 < len(self.stmts) and self.stmts[k + 1].first - n <= 2:
+        if k + 1 < len(self.stmts) and self.stmts[k + 1].first - n <= 20:
             return k + 1  # reported line is a comment/blank just before a statement
         return None
 
@@ -175,6 +183,24 @@ class Ctx:
                     return m.group(1)
         return None
 
+    def in_amdp(self, n):
+        """True if line n is inside an AMDP method (METHOD ... BY DATABASE PROCEDURE|FUNCTION ... ENDMETHOD),
+        whose body is SQLScript, not ABAP."""
+        if getattr(self, "_amdp", None) is None:
+            self._amdp, start = [], None
+            for k, line in enumerate(self.lines, 1):
+                code = strip_comment(line)
+                if start is None and re.search(r"\bBY\s+DATABASE\s+(?:PROCEDURE|FUNCTION|GRAPH)\b", code, re.I):
+                    start = k
+                elif start is None and re.match(r"\s*METHOD\b", code, re.I) and re.search(r"\bBY\s+DATABASE\b", " ".join(self.lines[k - 1:k + 2]), re.I):
+                    start = k
+                elif start is not None and re.match(r"\s*ENDMETHOD\b", code, re.I):
+                    self._amdp.append((start, k))
+                    start = None
+            if start is not None:
+                self._amdp.append((start, len(self.lines)))
+        return any(a <= n <= b for a, b in self._amdp)
+
     def ev(self, i, j=None):
         j = i if j is None else j
         seg = self.stmts[i:j + 1]
@@ -194,23 +220,63 @@ def expected(ctx, i, what):
 
 
 # =========================== simple keyword checkers ==========================
-def keyword(rx, label, start=None):
+def where_in_line(line, pos):
+    """'code' | 'comment' | 'string' for character position `pos` of an ABAP source line."""
+    if line.startswith("*"):
+        return "comment"
+    quote = None
+    for k, ch in enumerate(line):
+        if k >= pos:
+            break
+        if quote:
+            if ch == quote:
+                quote = None
+        elif ch in "'`|":
+            quote = ch
+        elif ch == '"':
+            return "comment"
+    return "string" if quote else "code"
+
+
+def keyword(rx, label, start=None, literals=False):
+    """`literals=True` for patterns that look INSIDE string literals (e.g. CALL 'SYSTEM', a function module name)."""
     rx = re.compile(rx)
     st = re.compile(start) if start else None
+
+    def text(s):
+        return s.up if literals else s.bare
+
+    def hit(s):
+        return (st is None or st.match(text(s))) and rx.search(text(s))
 
     def chk(ctx, n):
         i = ctx.stmt_at(n)
         if i is None:
             return NOSTMT
         s = ctx.stmts[i]
-        if (st is None or st.match(s.up)) and rx.search(s.up):
+        if hit(s):
             return TP, f"{label} found at line {s.first}", s.text
-        return FP, (f"No {label} in the statement at line {n}: it is commented out, inside a literal, "
-                    f"or a different statement"), s.text
+        nxt = ctx.stmts[i + 1] if i + 1 < len(ctx.stmts) else None
+        if nxt is not None and nxt.first - s.last <= 2 and hit(nxt):      # reported a line or two before the statement
+            return TP, f"{label} found at line {nxt.first} (reported {nxt.first - n} line(s) earlier)", nxt.text
+        # Is every occurrence of the construct inside a comment or a literal? (proof of a false positive)
+        places = [where_in_line(ctx.lines[k], m.start()) for k in range(s.first - 1, s.last)
+                  for m in rx.finditer(ctx.lines[k].upper())]
+        if 1 <= n <= len(ctx.lines) and not strip_comment(ctx.lines[n - 1]).strip():          # the reported line is a comment
+            body = re.sub(r"^[\s*\"]+", "", ctx.lines[n - 1]).upper()
+            if rx.search(body) or rx.search(ctx.lines[n - 1].upper()):
+                return FP, f"The {label} only appears in a comment at line {n}", ctx.lines[n - 1].strip()
+        if places and all(p in (("comment",) if literals else ("comment", "string")) for p in places):
+            return FP, f"The {label} only appears in a comment or a string literal in the statement at line {n}", s.text
+        if places:
+            return RV, (f"The {label} appears in the code around line {n}, but not where this checker expects it "
+                        f"(unusual statement layout, e.g. SQLScript)"), s.text
+        return RV, f"No {label} in the statement at line {n}", s.text
     return chk
 
 
-SQL_START = r"^(SELECT(?![\w-])|UPDATE|DELETE|INSERT|MODIFY|OPEN CURSOR)"
+SELECT_START = r"^(?:RETURN\s+)?SELECT(?![\w-])"
+SQL_START = r"^((?:RETURN\s+)?SELECT(?![\w-])|UPDATE|DELETE|INSERT|MODIFY|OPEN CURSOR)"
 DYN = r"(?<![\w])\((?!\s)[A-Z_/<][\w\-<>/~\[\]]*(?<!\s)\)"
 
 
@@ -314,12 +380,34 @@ def _nested(ctx, n, kinds, label):
 
 
 # ================================ SY-SUBRC checks ==============================
-SUBRC_ANY = re.compile(r"SY-SUBRC|SYST-SUBRC|\bIS\s+(NOT\s+)?(INITIAL|ASSIGNED|BOUND)\b|\bLINE_EXISTS\b|\bSQLCODE\b")
 SUBRC_ONLY = re.compile(r"SY-SUBRC|SYST-SUBRC")
+SUBRC_ASSIGN = re.compile(r"^(?:SY|SYST)-SUBRC\s*=")          # 'sy-subrc = 0.' assigns it, it does not check it
+
+
+def _targets(up):
+    """Variables receiving the result of a READ / SELECT (INTO x, ASSIGNING <fs>, REFERENCE INTO r)."""
+    found = re.findall(r"\b(?:INTO|ASSIGNING|REFERENCE INTO)\s+(?:CORRESPONDING FIELDS OF\s+)?(?:TABLE\s+)?(?:@?DATA\(\s*)?(@?[\w<>\-/~]+)", up)
+    return {x.lstrip("@").split("-")[0] for x in found if x.upper() != "TABLE"}
+
+
+def _checks_subrc(u, targets, strict):
+    """True if statement `u` READS the return code of the previous statement: it mentions SY-SUBRC
+    (not as an assignment target) or, unless strict, tests the READ/SELECT result variable itself."""
+    if SUBRC_ONLY.search(u) and not SUBRC_ASSIGN.match(u):
+        return True
+    if strict:
+        return False
+    return any(re.search(r"(?<![\w-])" + re.escape(t) + r"(?![\w])[\w\[\]\-<>]*\s+IS\s+(?:NOT\s+)?(?:INITIAL|ASSIGNED|BOUND)\b", u)
+               for t in targets)
+
+
+def _is_copy(up):
+    """'x = sy-subrc.' / 'MOVE sy-subrc TO x.': the code is stored, not tested."""
+    return bool(re.match(r"^[\w<>\-\[\]()]+\s*=\s*(?:SY|SYST)-SUBRC\s*$|^MOVE\s+(?:SY|SYST)-SUBRC\s+TO\b", up))
 
 
 def make_subrc(start_rx, label, strict=False):
-    start, rx = re.compile(start_rx), (SUBRC_ONLY if strict else SUBRC_ANY)
+    start = re.compile(start_rx)
 
     def chk(ctx, n):
         i, j = anchor(ctx, n, start)
@@ -328,11 +416,15 @@ def make_subrc(start_rx, label, strict=False):
         if j is None:
             return expected(ctx, i, label)
         end = ctx.sel_end.get(j, j)
+        targets = _targets(ctx.stmts[j].up)
         for k in range(end + 1, min(end + 7, len(ctx.stmts))):
             s = ctx.stmts[k]
             if PROC_END.match(s.up) or start.match(s.up):
                 break           # procedure ends / another statement overwrites SY-SUBRC
-            if rx.search(s.up):
+            if _checks_subrc(s.up, targets, strict):
+                if _is_copy(s.up):
+                    return RV, (f"SY-SUBRC is only copied at line {s.first} ({s.text[:60]}): confirm that the stored "
+                                f"value is evaluated"), ctx.ev(j, k)
                 return FP, f"Return code is checked at line {s.first}: {s.text[:80]}", ctx.ev(j, k)
         return TP, (f"No SY-SUBRC check after the {label} at line {ctx.stmts[j].first} "
                     f"(next 6 statements inspected)"), ctx.ev(j, min(end + 2, len(ctx.stmts) - 1))
@@ -365,6 +457,15 @@ def chk_at_in_loop_where(ctx, n):                                   # 7536
     i, j = anchor(ctx, n, re.compile(r"^LOOP(?![\w-])"))
     if i is None:
         return NOSTMT
+    if re.match(r"^AT\s+(NEW|END OF|FIRST|LAST)(?![\w-])", ctx.stmts[i].up):       # reported on the AT event itself
+        sp = ctx.innermost_loop(i)
+        while sp is not None and sp.kind != "LOOP":
+            sp = ctx.innermost_loop(sp.start)
+        if sp is None:
+            return RV, "AT event outside any LOOP", ctx.ev(i)
+        if re.search(r"\bWHERE\b", ctx.stmts[sp.start].up):
+            return TP, f"AT event at line {ctx.stmts[i].first} inside the LOOP AT ... WHERE at line {ctx.stmts[sp.start].first}", ctx.ev(sp.start, i)
+        return FP, "The enclosing LOOP AT has no WHERE clause", ctx.ev(sp.start, i)
     if j is None:
         return expected(ctx, i, "LOOP AT")
     if not re.search(r"\bWHERE\b", ctx.stmts[j].up):
@@ -401,6 +502,65 @@ def chk_loop_into(ctx, n):                                          # 7894
 
 
 # ============================= FOR ALL ENTRIES / SQL ===========================
+LEAVE_STMT = re.compile(r"^(EXIT|RETURN|STOP|LEAVE|CHECK|CONTINUE|RAISE)(?![\w-])|^MESSAGE\b.*\bTYPE\s+'[EAX]'|^MESSAGE\s+[EAX]\d")
+
+
+def _if_layout(ctx, k):
+    """For the IF at statement index k: (index of its first ELSE/ELSEIF or None, index of its ENDIF or None)."""
+    depth, else_idx = 0, None
+    for m in range(k, len(ctx.stmts)):
+        u = ctx.stmts[m].up
+        if re.match(r"^IF(?![\w-])", u):
+            depth += 1
+        elif re.match(r"^ENDIF(?![\w-])", u):
+            depth -= 1
+            if depth == 0:
+                return else_idx, m
+        elif depth == 1 and else_idx is None and re.match(r"^(ELSE|ELSEIF)(?![\w-])", u):
+            else_idx = m
+    return else_idx, None
+
+
+def _branch_leaves(ctx, a, b):
+    """True if a statement between index a and b (exclusive) always leaves the processing block:
+    top-level of the branch (not inside a nested IF) and not inside a loop that is itself in the branch."""
+    depth = 0
+    for m in range(a, b):
+        u = ctx.stmts[m].up
+        if re.match(r"^IF(?![\w-])", u):
+            depth += 1
+        elif re.match(r"^ENDIF(?![\w-])", u):
+            depth -= 1
+        elif depth == 0 and LEAVE_STMT.match(u) and not any(sp.start >= a and sp.start < m < sp.end for sp in ctx.spans):
+            return True
+    return False
+
+
+def _fae_guard(ctx, k, j, nm):
+    """Does the check at statement k really protect the SELECT at j? Returns a reason or None."""
+    u = ctx.stmts[k].up
+    nonempty = re.search(nm + r"\s+IS\s+NOT\s+INITIAL|\bNOT\s+" + nm + r"\s+IS\s+INITIAL|LINES\s*\(\s*" + nm + r"\s*\)\s*(?:>|NE|<>)\s*0", u)
+    empty = (not nonempty) and re.search(nm + r"\s+IS\s+INITIAL|LINES\s*\(\s*" + nm + r"\s*\)\s*(?:=|EQ)\s*0", u)
+    if not (nonempty or empty):
+        return None
+    if re.match(r"^CHECK(?![\w-])", u):
+        return "CHECK leaves the processing block when it is empty" if nonempty else None
+    if not re.match(r"^IF(?![\w-])", u):
+        return None
+    else_idx, end_idx = _if_layout(ctx, k)
+    if end_idx is None:
+        return None
+    first_branch_end = else_idx if else_idx is not None else end_idx
+    if nonempty and k < j < first_branch_end:
+        return "the SELECT is inside the branch that runs only when it is not empty"
+    if empty:
+        if else_idx is not None and else_idx < j < end_idx:
+            return "the SELECT is in the ELSE branch of the emptiness test"
+        if j > end_idx and _branch_leaves(ctx, k + 1, first_branch_end):
+            return "the branch handling the empty case leaves the processing block before the SELECT"
+    return None
+
+
 def chk_fae_initial(ctx, n):                                        # 7542, 7664
     i, j = anchor(ctx, n, SEL, 5)
     if i is None:
@@ -412,13 +572,13 @@ def chk_fae_initial(ctx, n):                                        # 7542, 7664
     if not m:
         return FP, "The statement has no FOR ALL ENTRIES addition", ctx.ev(j)
     name = m.group(1).lstrip("@").replace("[]", "")
-    nm = r"(?<![\w-])" + re.escape(name) + r"(\[\])?(?!\w)"
+    nm = r"(?<![\w-])" + re.escape(name) + r"(?:\[\])?(?!\w)"
     ps = ctx.proc_start(j)
-    for k in range(j - 1, max(ps, j - 25) - 1, -1):
-        u = ctx.stmts[k].up
-        if re.search(nm, u) and re.search(r"\bIS\s+(NOT\s+)?INITIAL\b|\bLINES\s*\(|\bLINE_EXISTS\b", u):
-            return FP, f"Driver table {name} is checked for emptiness at line {ctx.stmts[k].first}: {ctx.stmts[k].text[:70]}", ctx.ev(k, j)
-    return TP, (f"No emptiness check of driver table {name} in the 25 statements before the SELECT "
+    for k in range(j - 1, max(ps, j - 60) - 1, -1):
+        why = _fae_guard(ctx, k, j, nm)
+        if why:
+            return FP, f"Driver table {name} is tested at line {ctx.stmts[k].first} ({ctx.stmts[k].text[:60]}): {why}", ctx.ev(k, j)
+    return TP, (f"No emptiness guard of driver table {name} protects the SELECT "
                 f"(an empty table would select ALL rows)"), ctx.ev(j)
 
 
@@ -438,11 +598,11 @@ def chk_select_star(ctx, n):                                        # 7530
     if i is None:
         return NOSTMT
     s = ctx.stmts[i]
-    if SEL.match(s.up) and re.search(r"^SELECT\s+(SINGLE\s+)?(DISTINCT\s+)?\*|\bFIELDS\s+\*", s.up):
+    if re.match(SELECT_START, s.up) and re.search(r"^(?:RETURN\s+)?SELECT\s+(SINGLE\s+)?(DISTINCT\s+)?\*|\bFIELDS\s+\*", s.up):
         return TP, "SELECT * / SELECT SINGLE * reads all columns", s.text
-    if SEL.match(s.up):
+    if re.match(SELECT_START, s.up):
         return FP, "The SELECT uses an explicit field list (or an aggregate), not *", s.text
-    return FP, "Not a SELECT statement at this line (commented out or source differs)", s.text
+    return RV, "Not a SELECT statement at this line (commented out or source differs)", s.text
 
 
 def chk_order_by_no_sort(ctx, n):                                   # 8134
@@ -493,7 +653,10 @@ def chk_cartesian(ctx, n):                                          # 7820, 7660
     joins, ons = len(re.findall(r"\bJOIN\b", s.up)), len(re.findall(r"\bON\b", s.up))
     if joins > ons:
         return TP, f"{joins} JOIN(s) but only {ons} ON condition(s): a join without condition is a cartesian product", s.text
-    return FP, "Every JOIN has an ON condition", s.text
+    rels = sum(1 for m in re.finditer(r"([\w@]+)~\w+\s*=\s*([\w@]+)~\w+", s.up) if m.group(1) != m.group(2))
+    if joins and rels < joins:
+        return RV, f"Every JOIN has an ON condition, but only {rels} comparison(s) relate two tables for {joins} join(s): check for a cartesian product", s.text
+    return FP, "Every JOIN has an ON condition relating the joined tables", s.text
 
 
 def chk_open_sql_in_loop(ctx, n):                                   # 7868
@@ -508,7 +671,7 @@ def chk_open_sql_in_loop(ctx, n):                                   # 7868
         if re.match(r"^(INSERT|DELETE|MODIFY|UPDATE)", u):
             is_sql = None
         else:
-            return FP, "Not an Open SQL statement at this line", s.text
+            return RV, "Not an Open SQL statement at this line", s.text
     loops = [sp for sp in ctx.spans if sp.start < i < sp.end]
     if is_sql is None:
         return RV, "INSERT/DELETE/MODIFY/UPDATE: cannot tell a database table from an internal table in this file", s.text
@@ -536,7 +699,7 @@ def chk_empty_proc(ctx, n):                                         # 7512
 
 
 def chk_empty_file(ctx, n):                                         # 7514, 7516
-    hdr = re.compile(r"^(REPORT|PROGRAM|FUNCTION-POOL|TYPE-POOL|CLASS-POOL|INTERFACE-POOL)(?![\w-])")
+    hdr = re.compile(r"^(REPORT|PROGRAM|FUNCTION-POOL|TYPE-POOL|CLASS-POOL|INTERFACE-POOL|INCLUDE_NAME|USER_EXIT_NAME)(?![\w-])")
     body = [s for s in ctx.stmts if not hdr.match(s.up)]
     if not body:
         return TP, "The file contains no statement other than the program header", ""
@@ -640,7 +803,7 @@ def chk_exit(ctx, n):                                               # 7672
         return NOSTMT
     s = ctx.stmts[i]
     if not re.match(r"^EXIT(?![\w-])", s.up):
-        return FP, "Not an EXIT statement at this line", s.text
+        return RV, "Not an EXIT statement at this line", s.text
     lp = ctx.innermost_loop(i)
     if lp:
         return FP, f"EXIT only leaves the {lp.kind} loop at line {ctx.stmts[lp.start].first}, not the include", s.text
@@ -653,7 +816,7 @@ def chk_sy_uname(ctx, n):                                           # 7906
         return NOSTMT
     s = ctx.stmts[i]
     if "SY-UNAME" not in s.up and "SYST-UNAME" not in s.up:
-        return FP, "SY-UNAME does not appear in the statement at this line", s.text
+        return RV, "SY-UNAME does not appear in the statement at this line", s.text
     lit = (r"\b(SY|SYST)-UNAME\s*(=|EQ|<>|NE|CS|CP|NS|NP|IN)\s*['`]|['`][^'`]*['`]\s*(=|EQ|<>|NE)\s*(SY|SYST)-UNAME"
            r"|^CASE\s+(SY|SYST)-UNAME")
     if re.search(lit, s.up):
@@ -690,7 +853,7 @@ def make_auth(trigger_rx, label, own_auth=None, ambiguous=False):
         if i is None:
             return NOSTMT
         if j is None:
-            return FP, f"No {label} statement at/near the reported line (commented out or source differs)", ctx.ev(i)
+            return RV, f"No {label} statement at/near the reported line (commented out or source differs)", ctx.ev(i)
         s = ctx.stmts[j]
         if own and own.search(s.up):
             return FP, "The statement itself performs the authorization check", s.text
@@ -710,7 +873,7 @@ def chk_modify_auth(ctx, n):                                        # 8578
         return NOSTMT
     s = ctx.stmts[i]
     if not re.match(r"^MODIFY(?![\w-])", s.up):
-        return FP, "Not a MODIFY statement at this line", s.text
+        return RV, "Not a MODIFY statement at this line", s.text
     if re.match(r"^MODIFY\s+(SCREEN|LINE|CURRENT LINE)\b", s.up):
         return FP, "MODIFY SCREEN/LINE does not write to the database", s.text
     return make_auth(r"^MODIFY(?![\w-])", "MODIFY", ambiguous=True)(ctx, n)
@@ -722,7 +885,7 @@ def chk_commit_in_update(ctx, n):                                   # 8422
         return NOSTMT
     s = ctx.stmts[i]
     if not re.match(r"^(COMMIT WORK|ROLLBACK WORK)", s.up):
-        return FP, "Not a COMMIT WORK / ROLLBACK WORK at this line", s.text
+        return RV, "Not a COMMIT WORK / ROLLBACK WORK at this line", s.text
     ps = ctx.proc_start(i)
     if re.match(r"^FORM\b.*\bON (COMMIT|ROLLBACK)\b", ctx.stmts[ps].up):
         return TP, "COMMIT/ROLLBACK inside a FORM called ON COMMIT/ROLLBACK (update work process)", ctx.ev(ps, i)
@@ -766,7 +929,7 @@ def reg(ids, name, fn):
 
 
 reg(7538, "DEPRECATED: Avoid using SELECT ... INTO CORRESPONDING FIELDS OF",
-    keyword(r"\b(INTO|APPENDING)\s+CORRESPONDING\s+FIELDS\s+OF\b", "INTO/APPENDING CORRESPONDING FIELDS OF", r"^SELECT(?![\w-])"))
+    keyword(r"\b(INTO|APPENDING)\s+CORRESPONDING\s+FIELDS\s+OF\b", "INTO/APPENDING CORRESPONDING FIELDS OF", SELECT_START))
 reg(7544, "Avoid using SELECT ... ENDSELECT statement", chk_select_endselect)
 reg(7666, "Avoid using SELECT ... ENDSELECT statement on XXL Tables", chk_select_endselect)
 reg(8126, "Avoid using empty SELECT ... ENDSELECT loop", chk_empty_select)
@@ -813,8 +976,8 @@ reg(8578, "Avoid using MODIFY without Authorization Check", chk_modify_auth)
 K = keyword
 reg(7524, "Avoid using BREAK or BREAK-POINT statement", K(r"^BREAK(?![\w])", "BREAK / BREAK-POINT statement"))
 reg(7528, "Never use the ON CHANGE OF statement", K(r"^ON CHANGE OF(?![\w-])", "ON CHANGE OF statement"))
-reg(7592, 'Avoid using "ORDER BY" in SELECTS', K(r"\bORDER BY\b", "ORDER BY clause", r"^SELECT(?![\w-])"))
-reg(7594, 'Avoid using "SELECT DISTINCT"', K(r"\bDISTINCT\b", "SELECT DISTINCT", r"^SELECT(?![\w-])"))
+reg(7592, 'Avoid using "ORDER BY" in SELECTS', K(r"\bORDER BY\b", "ORDER BY clause", SELECT_START))
+reg(7594, 'Avoid using "SELECT DISTINCT"', K(r"\bDISTINCT\b", "SELECT DISTINCT", SELECT_START))
 reg(7866, "Avoid SELECT ... BYPASSING BUFFER", K(r"\bBYPASSING BUFFER\b", "BYPASSING BUFFER addition"))
 reg(7870, "Avoid using the NOT LIKE operator in WHERE clauses", K(r"\bNOT\s+LIKE\b", "NOT LIKE operator", SQL_START))
 reg(7872, "Avoid using IS [NOT] NULL in WHERE condition", K(r"\bIS\s+(NOT\s+)?NULL\b", "IS [NOT] NULL", SQL_START))
@@ -822,16 +985,16 @@ reg([7874, 1101024], "Avoid using dynamic queries", K(DYN, "dynamic SQL token (.
 reg(7876, "Avoid using SELECT ... FOR UPDATE", K(r"\bFOR UPDATE\b", "FOR UPDATE addition"))
 reg(7882, "Avoid using Native SQL", K(r"^EXEC SQL(?![\w-])|\bCL_SQL_(STATEMENT|CONNECTION)\b", "Native SQL (EXEC SQL / ADBC)"))
 reg(7886, "Avoid using SYSTEM-CALL", K(r"^SYSTEM-CALL(?![\w-])", "SYSTEM-CALL statement"))
-reg([7806, 1101018], "Avoid Artifacts with Group By", K(r"\bGROUP BY\b", "GROUP BY clause", r"^SELECT(?![\w-])"))
-reg(7808, "Avoid Artifacts with SQL statement including subqueries", K(r"\(\s*SELECT\b", "subquery", r"^SELECT(?![\w-])"))
+reg([7806, 1101018], "Avoid Artifacts with Group By", K(r"\bGROUP BY\b", "GROUP BY clause", SELECT_START))
+reg(7808, "Avoid Artifacts with SQL statement including subqueries", K(r"\(\s*SELECT\b", "subquery", SELECT_START))
 reg(8116, "Avoid calling system function (CALL 'cfunc')", K(r"^CALL\s+['`]", "CALL 'cfunc' statement"))
-reg(8118, "Avoid using the RFC_ABAP_INSTALL_AND_RUN function", K(r"RFC_ABAP_INSTALL_AND_RUN", "RFC_ABAP_INSTALL_AND_RUN call"))
-reg(8124, "Do not use function module DB_EXISTS_INDEX (HANA)", K(r"DB_EXISTS_INDEX", "DB_EXISTS_INDEX call"))
+reg(8118, "Avoid using the RFC_ABAP_INSTALL_AND_RUN function", K(r"RFC_ABAP_INSTALL_AND_RUN", "RFC_ABAP_INSTALL_AND_RUN call", literals=True))
+reg(8124, "Do not use function module DB_EXISTS_INDEX (HANA)", K(r"DB_EXISTS_INDEX", "DB_EXISTS_INDEX call", literals=True))
 reg(8130, "Avoid using database hints", K(r"%_HINTS\b", "%_HINTS database hint"))
 reg(8412, '"CX_ROOT" should not be used in TRY .. CATCH.. ENDTRY block', K(r"^CATCH\b.*\bCX_ROOT\b", "CATCH of CX_ROOT"))
-reg(8426, 'Avoid calling database commands directly via "C_DB_EXECUTE"/"C_DB_FUNCTION"', K(r"^CALL\s+['`]C_DB_(EXECUTE|FUNCTION)['`]", "CALL 'C_DB_...'"))
+reg(8426, 'Avoid calling database commands directly via "C_DB_EXECUTE"/"C_DB_FUNCTION"', K(r"^CALL\s+['`]C_DB_(EXECUTE|FUNCTION)['`]", "CALL 'C_DB_...'", literals=True))
 reg(8432, "Avoid Cross-Client Database Access (CLIENT SPECIFIED / USING CLIENT)", K(r"\b(CLIENT SPECIFIED|USING CLIENT)\b", "CLIENT SPECIFIED / USING CLIENT"))
-reg(8546, "Avoid using ABAP command CALL 'SYSTEM'", K(r"^CALL\s+['`]SYSTEM['`]", "CALL 'SYSTEM'"))
+reg(8546, "Avoid using ABAP command CALL 'SYSTEM'", K(r"^CALL\s+['`]SYSTEM['`]", "CALL 'SYSTEM'", literals=True))
 reg(8548, "Avoid using ABAP command INSERT REPORT", K(r"^INSERT REPORT(?![\w-])", "INSERT REPORT"))
 reg(8550, "Avoid using ABAP command GENERATE SUBROUTINE POOL", K(r"^GENERATE SUBROUTINE POOL(?![\w-])", "GENERATE SUBROUTINE POOL"))
 reg(8552, "Avoid using ABAP command OPEN DATASET with the FILTER addition", K(r"\bFILTER\b", "FILTER addition", r"^OPEN DATASET(?![\w-])"))
@@ -850,11 +1013,23 @@ def chk_call_error_handling(kind):
         if j is None:
             return RV, f"No CALL {kind} statement at the reported line (functional call syntax is not analysed)", ctx.ev(i)
         s = ctx.stmts[j]
-        if re.search(r"\bEXCEPTIONS\b", s.up):
-            return FP, "The call has an EXCEPTIONS addition (classic exception handling)", s.text
+        for k in range(j + 1, min(j + 7, len(ctx.stmts))):
+            u = ctx.stmts[k]
+            if PROC_END.match(u.up) or start.match(u.up):
+                break           # procedure ends / another call overwrites SY-SUBRC
+            if _checks_subrc(u.up, set(), True):
+                if _is_copy(u.up):
+                    return RV, (f"SY-SUBRC is only copied at line {u.first} ({u.text[:60]}): confirm that the stored "
+                                f"value is evaluated"), ctx.ev(j, k)
+                return FP, f"SY-SUBRC is checked at line {u.first}: {u.text[:70]}", ctx.ev(j, k)
         if ctx.in_try(j):
-            return FP, "The call is inside the protected part of a TRY block", s.text
-        return TP, "No EXCEPTIONS addition and not inside a TRY block (SY-SUBRC/exceptions are not handled)", s.text
+            return FP, "The call is inside the protected part of a TRY block (class-based exceptions)", s.text
+        raw = " ".join(ctx.lines[s.first - 1:s.last])
+        note = " (the inspector is silenced by a pragma/pseudo-comment, which does not handle the error)" \
+            if re.search(r"##FM_SUBRC_OK|#EC\s+CI_SUBRC", raw) else ""
+        if re.search(r"\bEXCEPTIONS\b", s.up):
+            return TP, "EXCEPTIONS are declared but SY-SUBRC is never checked afterwards" + note, s.text
+        return TP, "No EXCEPTIONS addition, SY-SUBRC not checked and not inside a TRY block" + note, s.text
     return chk
 
 

@@ -59,7 +59,7 @@ CASES = [
     ("7820", "SELECT a FROM t1 JOIN t2 ON t1~a = t2~a INTO TABLE lt.", 1, FP),
     ("7868", "LOOP AT lt INTO ls.\n  SELECT SINGLE * FROM t INTO l2 WHERE a = ls-a.\nENDLOOP.", 2, TP),
     ("7868", "SELECT SINGLE * FROM t INTO l2 WHERE a = 1.", 1, RV),
-    ("7868", "WRITE 1.", 1, FP),
+    ("7868", "WRITE 1.", 1, RV),
     # --- blocks
     ("7512", "FORM f.\nENDFORM.", 1, TP),
     ("7512", "FORM f.\n  \" nothing\nENDFORM.", 1, TP),
@@ -82,7 +82,7 @@ CASES = [
     ("7672", "LOOP AT lt INTO l.\n  EXIT.\nENDLOOP.", 2, FP),
     ("7906", "IF sy-uname = 'JOHN'.\nENDIF.", 1, TP),
     ("7906", "IF sy-uname = lv_user.\nENDIF.", 1, RV),
-    ("7906", "IF sy-datum = lv_d.\nENDIF.", 1, FP),
+    ("7906", "IF sy-datum = lv_d.\nENDIF.", 1, RV),
     ("8430", "lo = cl_abap_random=>create( seed = 42 ).", 1, TP),
     ("8430", "lo = cl_abap_random=>create( seed = cl_abap_random=>seed( ) ).", 1, FP),
     ("8430", "lo = cl_abap_random=>create( ).", 1, TP),
@@ -93,13 +93,13 @@ CASES = [
     ("8576", "FORM f.\n  OPEN DATASET p FOR INPUT IN TEXT MODE ENCODING DEFAULT.\nENDFORM.", 2, TP),
     ("8576", "FORM f.\n  AUTHORITY-CHECK OBJECT 'S_DATASET' ID 'ACTVT' FIELD '06'.\n  OPEN DATASET p FOR INPUT IN TEXT MODE ENCODING DEFAULT.\nENDFORM.", 3, FP),
     ("8582", "CALL FUNCTION lv_fm.", 1, TP),
-    ("8582", "CALL FUNCTION 'Z_FM'.", 1, FP),
+    ("8582", "CALL FUNCTION 'Z_FM'.", 1, RV),
     ("8578", "MODIFY SCREEN.", 1, FP),
     ("8578", "MODIFY ztab FROM ls.", 1, RV),
     ("8422", "FORM f ON COMMIT.\n  COMMIT WORK.\nENDFORM.", 2, TP),
     # --- error handling
     ("8120", "CALL FUNCTION 'Z' EXPORTING a = 1.", 1, TP),
-    ("8120", "CALL FUNCTION 'Z' EXPORTING a = 1 EXCEPTIONS OTHERS = 1.", 1, FP),
+    ("8120", "CALL FUNCTION 'Z' EXPORTING a = 1 EXCEPTIONS OTHERS = 1.", 1, TP),   # EXCEPTIONS declared, SY-SUBRC never read
     ("8120", "TRY.\n  CALL FUNCTION 'Z' EXPORTING a = 1.\nCATCH cx_a.\nENDTRY.", 2, FP),
     ("8120", "TRY.\nCATCH cx_a.\n  CALL FUNCTION 'Z' EXPORTING a = 1.\nENDTRY.", 3, TP),
     ("8122", "CALL METHOD o->m.", 1, TP),
@@ -109,12 +109,12 @@ CASES = [
     ("7524", "* BREAK-POINT.\nWRITE 1.", 1, FP),
     ("7528", "ON CHANGE OF a.\nENDON.", 1, TP),
     ("7592", "SELECT a FROM t INTO TABLE lt ORDER BY a.", 1, TP),
-    ("7592", "SELECT a FROM t INTO TABLE lt.", 1, FP),
+    ("7592", "SELECT a FROM t INTO TABLE lt.", 1, RV),
     ("7594", "SELECT DISTINCT a FROM t INTO TABLE lt.", 1, TP),
     ("7870", "SELECT a FROM t INTO TABLE lt WHERE b NOT LIKE 'X%'.", 1, TP),
     ("7872", "SELECT a FROM t INTO TABLE lt WHERE b IS NULL.", 1, TP),
     ("7874", "SELECT a FROM (lv_tab) INTO TABLE lt WHERE (lv_where).", 1, TP),
-    ("7874", "SELECT a FROM t INTO TABLE lt WHERE b IN ('A','B') AND c = COUNT( * ).", 1, FP),
+    ("7874", "SELECT a FROM t INTO TABLE lt WHERE b IN ('A','B') AND c = COUNT( * ).", 1, RV),
     ("7876", "SELECT SINGLE a FROM t INTO l FOR UPDATE.", 1, TP),
     ("7882", "EXEC SQL.\n  select 1 from dual\nENDEXEC.", 1, TP),
     ("7886", "SYSTEM-CALL CREATE CLASS-OBJECT.", 1, TP),
@@ -124,7 +124,7 @@ CASES = [
     ("8118", "CALL FUNCTION 'RFC_ABAP_INSTALL_AND_RUN'.", 1, TP),
     ("8130", "SELECT a FROM t INTO TABLE lt %_HINTS ORACLE 'FOO'.", 1, TP),
     ("8412", "TRY.\nCATCH cx_root INTO lx.\nENDTRY.", 2, TP),
-    ("8412", "TRY.\nCATCH cx_root_foo INTO lx.\nENDTRY.", 2, FP),
+    ("8412", "TRY.\nCATCH cx_root_foo INTO lx.\nENDTRY.", 2, RV),
     ("8426", "CALL 'C_DB_EXECUTE' ID 'STATLEN' FIELD l.", 1, TP),
     ("8432", "SELECT * FROM t CLIENT SPECIFIED INTO TABLE lt WHERE mandt = '100'.", 1, TP),
     ("8546", "CALL 'SYSTEM' ID 'COMMAND' FIELD c.", 1, TP),
@@ -133,10 +133,58 @@ CASES = [
     ("8552", "OPEN DATASET p FOR OUTPUT IN TEXT MODE ENCODING DEFAULT FILTER 'x'.", 1, TP),
     ("8572", "SUBMIT zrep USER 'BATCH' VIA JOB j NUMBER n AND RETURN.", 1, TP),
     ("8574", "CALL TRANSACTION p_tcode.", 1, TP),
-    ("8574", "CALL TRANSACTION 'SE38'.", 1, FP),
+    ("8574", "CALL TRANSACTION 'SE38'.", 1, RV),
     ("8586", "CALL FUNCTION p_name.", 1, TP),
     # --- review only
     ("7766", "FORM f.\nENDFORM.", 1, RV),
+
+    # --- regression tests taken from real code (SAP billing/sales user exits) -----------------------
+    # 7520: an IS INITIAL test of an UNRELATED variable is not a return-code check
+    ("7520", "UPDATE vbap SET awahr = 100 WHERE vbeln = x.\nIF CVBAP-POSNR IS INITIAL.\n  MESSAGE a247 WITH '151'.\nENDIF.", 1, TP),
+    # 7520: 'sy-subrc = 0.' ASSIGNS the return code, it does not check it
+    ("7520", "IF NOT vbak IS INITIAL.\n  SELECT SINGLE vkorg FROM zsd INTO l_vkorg WHERE vkorg = vbak-vkorg.\nENDIF.\nSY-SUBRC = 0.\nCHECK analyze_mode IS INITIAL.", 2, TP),
+    # 7520: SY-SUBRC read in a WHILE condition IS a check
+    ("7520", "READ TABLE cvbpa WITH KEY cvbpa(19) BINARY SEARCH.\n* copy the partner\nWHILE cvbpa-posnr = cvbap-vgpos AND\n      SY-SUBRC = 0.\nENDWHILE.", 1, FP),
+    # 7520: testing the result variable itself counts
+    ("7520", "SELECT SINGLE mwsk1 FROM t INTO lv_mwsk1 WHERE a = 1.\nCHECK lv_mwsk1 IS NOT INITIAL.", 1, FP),
+    # 8120 / 8122: EXCEPTIONS only help if the return code is read afterwards
+    ("8120", "CALL FUNCTION 'Z' EXPORTING a = 1 EXCEPTIONS OTHERS = 1.\nIF sy-subrc <> 0.\n  RETURN.\nENDIF.", 1, FP),
+    ("8120", "CALL FUNCTION 'APPL_LOG_INIT'  ##FM_SUBRC_OK\n  EXPORTING object = o\n  EXCEPTIONS object_not_found = 1. \"#EC CI_SUBRC\n\nCALL FUNCTION 'MESSAGES_INITIALIZE'.", 1, TP),
+    ("8120", "CALL FUNCTION 'MESSAGES_INITIALIZE'.", 1, TP),
+    ("8122", "CALL METHOD o->m EXCEPTIONS foo = 1.\nIF sy-subrc = 0.\nENDIF.", 1, FP),
+    ("8122", "CALL METHOD o->m EXCEPTIONS foo = 1.\nWRITE 1.", 1, TP),
+    # 7542: 'IF t[] IS INITIAL ... EXIT. ENDIF.' is a real guard
+    ("7542", "IF t[] IS INITIAL.\n  PERFORM f_message.\n  EXIT.\nENDIF.\nSORT t BY a.\nSELECT * FROM x INTO TABLE r FOR ALL ENTRIES IN t WHERE a = t-a.", 6, FP),
+    # 7542: ...but only if the empty branch really leaves
+    ("7542", "IF t[] IS INITIAL.\n  WRITE 1.\nENDIF.\nSELECT * FROM x INTO TABLE r FOR ALL ENTRIES IN t WHERE a = t-a.", 4, TP),
+    ("7542", "IF t[] IS INITIAL.\n  LOOP AT x INTO y.\n    EXIT.\n  ENDLOOP.\nENDIF.\nSELECT * FROM x INTO TABLE r FOR ALL ENTRIES IN t WHERE a = t-a.", 6, TP),
+    ("7542", "IF t[] IS INITIAL.\n  WRITE 1.\nELSE.\n  SELECT * FROM x INTO TABLE r FOR ALL ENTRIES IN t WHERE a = t-a.\nENDIF.", 4, FP),
+    ("7542", "IF NOT t[] IS INITIAL.\n  SELECT * FROM x INTO TABLE r FOR ALL ENTRIES IN t WHERE a = t-a.\nENDIF.", 2, FP),
+    ("7542", "IF t[] IS NOT INITIAL.\nENDIF.\nSELECT * FROM x INTO TABLE r FOR ALL ENTRIES IN t WHERE a = t-a.", 3, TP),
+    ("7542", "CHECK t[] IS NOT INITIAL.\nSELECT * FROM x INTO TABLE r FOR ALL ENTRIES IN t WHERE a = t-a.", 2, FP),
+    # a copy of SY-SUBRC into a result field reads it but does not test it -> REVIEW, not a proven false positive
+    ("8120", "CALL FUNCTION 'Z' EXPORTING a = 1 EXCEPTIONS OTHERS = 1.\nt_result-zzcode = sy-subrc.", 1, RV),
+    ("7520", "READ TABLE lt INTO ls INDEX 1.\nlv_rc = sy-subrc.", 1, RV),
+    # --- regression tests from real code (anchoring and parsing details seen on a real server) ------------
+    ("1101018", "RETURN\n  SELECT a, SUM( b ) AS s\n    FROM t\n    GROUP BY a.", 1, TP),                       # RETURN SELECT ...
+    ("7882", "DO.\n  EXEC \"#EC CI_EXECSQL\n    SQL.\n    select 1 from dual\n  ENDEXEC.\nENDDO.", 1, TP),     # reported on the DO. before
+    ("7882", "DO.\n  WRITE 1.\nENDDO.", 1, RV),
+    ("7514", "* Extractor header\nINCLUDE_NAME ZX .\n*&---\n", 1, TP),                                       # extractor pseudo-statement only
+    ("7514", "INCLUDE_NAME ZX .\nWRITE 1.\n", 1, FP),
+    ("7858", "*&-----\n*&  Form  X\n*&-----\nFORM x USING VALUE(p) TYPE i.\nENDFORM.", 2, TP),             # reported on the comment header
+    ("7536", "LOOP AT lt INTO ls WHERE a = 1.\n  AT NEW b.\n  ENDAT.\nENDLOOP.", 2, TP),                     # reported on the AT line
+    ("7536", "LOOP AT lt INTO ls.\n  AT NEW b.\n  ENDAT.\nENDLOOP.", 2, FP),
+    ("7820", "SELECT a FROM t1 AS a INNER JOIN t2 AS b ON b~x = @lv INTO TABLE @lt.", 1, RV),            # ON does not relate the tables
+    ("7820", "SELECT a FROM t1 AS a INNER JOIN t2 AS b ON b~x = a~x INTO TABLE @lt.", 1, FP),
+    ("7524", "* BREAK-POINT.\nWRITE 1.", 1, FP),                                                         # reported line is a comment
+    # --- a comment/string verdict must be PROVEN: every occurrence is inside a comment or a literal ----------
+    ("8130", "SELECT a FROM t INTO TABLE lt WHERE b = 'x %_HINTS y'.", 1, FP),                      # only inside a literal
+    ("8130", "SELECT a FROM t INTO TABLE lt  \" %_HINTS ORACLE 'x'\n  WHERE b = 1.", 1, FP),        # only in a comment
+    ("8130", "SELECT a FROM t INTO TABLE lt WHERE b = 'x'  %_HINTS ORACLE 'FOO'.", 1, TP),         # real code
+    # SQLScript (no '.' terminators) merges into one ABAP "statement": real GROUP BY must never become a false positive
+    ("1101018", "itab = select a, count(*) AS c\n  FROM t\n  GROUP BY a;\nENDMETHOD.", 1, RV),
+    # long comment banner above a FORM (reported line is in the banner)
+    ("7858", "*&" + "-" * 20 + "\n" + "*&  comment\n" * 12 + "FORM x USING VALUE(p) TYPE i.\nENDFORM.", 2, TP),
 ]
 
 

@@ -19,7 +19,8 @@ Rule families (one checker module each):
   sql     sql_checkers.py      SQL Analyzer: PL/SQL, T-SQL, COBOL embedded SQL (rules 11010xx)
 
 Input (one of):  --url/--api-key/--app          Gatekeeper MCP server (Imaging >= 3.6.4)
-                 --rest-url/--domain/--app     CAST Dashboard REST API (Imaging before 3.6.4), see dashboard_rest.py
+                 --rest-url/--domain/--app     CAST Dashboard REST API (Imaging before 3.6.4), see dashboard_rest.py;
+                                               the analysed source is downloaded from the server (--source-root optional)
                  --input violations.csv        CSV/JSON export, no server needed
 Rule selection:  --rule-ids auto | abap | sapui5 | web | sql | all | 7520,1020600,...
                  auto = every rule that has a real checker (default)
@@ -83,9 +84,9 @@ def text_of(result):
     return "".join(c.text for c in result.content if getattr(c, "text", None))
 
 
-def locate_source(root: Path, rel: str):
+def locate_source(root, rel):
     rel = (rel or "").replace("\\", "/").lstrip("/")
-    if not rel:
+    if not rel or root is None:
         return None
     if (root / rel).is_file():
         return root / rel
@@ -123,11 +124,18 @@ def rule_name(rid):
     return "(manual-review rule)" if any(rid in m for m in MANUAL) else None
 
 
+SQL_ON_ABAP = "SQL rule on an ABAP file (embedded Open SQL / AMDP SQLScript): not parsed by the SQL checker"
+
+
 def pick_checker(rid, path):
-    """Return (family, check). Shared ids go to SQL only for SQL/COBOL files."""
+    """Return (family, check). Shared ids go to SQL only for SQL/COBOL files; SQL-only rules that fire on
+    ABAP files (AMDP SQLScript, Open SQL) are review-only because the SQL parser does not understand ABAP."""
     is_sql_file = path is not None and path.suffix.lower() in sq.SQL_EXT
     if is_sql_file and rid in sq.RULES:
         return "sql", sq.RULES[rid][1]
+    if path is not None and path.suffix.lower() == ".abap" and rid in sq.RULES \
+            and not any(rid in FAMILIES[f] for f in ("sapui5", "web", "abap")):
+        return "manual", SQL_ON_ABAP
     for fam in ("sapui5", "web", "abap", "sql"):
         if rid in FAMILIES[fam]:
             return fam, FAMILIES[fam][rid][1]
@@ -176,7 +184,11 @@ def run_check(fam, check, ctx, line, category=None):
     if fam == "manual":
         ev = " ".join(ctx[line - 1].split())[:300] if 1 <= line <= len(ctx) else ""
         return RV, f"{category}: cannot be decided from the source text alone, review manually", ev
-    return check(ctx, line)
+    verdict, why, ev = check(ctx, line)
+    if fam == "abap" and verdict != RV and ctx.in_amdp(line):
+        return RV, (f"Inside an AMDP method (SQLScript): ABAP statement parsing does not apply, so the checker's "
+                    f"verdict ({verdict}: {why}) is not reliable"), ev
+    return verdict, why, ev
 
 
 # ----------------------------------------------------------------------------------------------
@@ -256,28 +268,35 @@ def load_violations(path):
     return viols, {"headers": headers, "rows": len(records), "skipped": bad}
 
 
-def classify(v, rid, name, root, cache):
-    """Run the rule's checker on one violation and return the report row."""
+def classify(v, rid, name, root, cache, resolver=None):
+    """Run the rule's checker on one violation and return the report row.
+    `resolver(v)` (REST mode) returns the server copy of the file; --source-root is the fallback."""
     file_, line = pick(v, "file"), pick(v, "line")
-    path = locate_source(root, file_)
+    path = resolver(v) if resolver else None
+    if path is None:
+        path = locate_source(root, file_)
     fam, check = pick_checker(rid, path)
     if path is None or not str(line).isdigit():
-        verdict, why, ev = RV, "Source file or line not found under --source-root", ""
+        verdict, why, ev = RV, ("Source file or line not available (not downloadable from the server, "
+                                "not found under --source-root, or no location reported)"), ""
     else:
         key = (path, fam)
         if key not in cache:
             cache[key] = make_ctx(fam, path)
-        cat = next((m[rid] for m in MANUAL if rid in m), None)
+        cat = check if fam == "manual" and isinstance(check, str) else next((m[rid] for m in MANUAL if rid in m), None)
         try:
             verdict, why, ev = run_check(fam, check, cache[key], int(line), cat)
         except Exception as e:  # a checker bug must never stop the batch
             verdict, why, ev = RV, f"Checker error: {e!r}", ""
+    if verdict == RV and re.match(r"No |Not an? |Expected ", why):
+        why += (" (CAST reported this line, so this is either a line-anchoring difference or a limit of this "
+                "checker: confirm manually)")
     return {"rule": rid, "rule_name": name, "object": pick(v, "object"), "file": file_, "line": line,
             "verdict": verdict, "reason": why, "evidence": ev,
             "justification": f"[{rid}] {why}" if verdict == FP else "", "excluded": ""}
 
 
-async def triage(rules, fetch, exclude, args, root):
+async def triage(rules, fetch, exclude, args, root, resolver=None):
     """Shared loop: `fetch(rid, quota)` yields the violations of a rule (None = skip it),
     `exclude(v, row)` (MCP mode only) creates the exclusion and returns the text for the `excluded` column."""
     rows, remaining, cache = [], args.limit, {}
@@ -295,7 +314,7 @@ async def triage(rules, fetch, exclude, args, root):
         if quota is not None:
             viols = viols[:quota]
         for v in viols:
-            row = classify(v, rid, name, root, cache)
+            row = classify(v, rid, name, root, cache, resolver)
             if exclude and row["verdict"] == FP:
                 row["excluded"] = await exclude(v, row)
             rows.append(row)
@@ -356,7 +375,7 @@ async def main():
     if args.input or args.rest_url:
         if args.apply_exclusions:
             ap.error("--apply-exclusions needs the MCP server; use the justification column of the report instead")
-        if not args.source_root:
+        if not args.source_root and not args.rest_url:
             ap.error("--source-root is required")
         if args.rest_url:
             for req in ("domain", "app"):
@@ -366,7 +385,7 @@ async def main():
         for req in ("url", "api_key", "app", "source_root"):
             if not getattr(args, req):
                 ap.error(f"--{req.replace('_', '-')} is required (or use --rest-url, or --input FILE)")
-    root = Path(args.source_root)
+    root = Path(args.source_root) if args.source_root else None
 
     if args.input:
         viols, info = load_violations(args.input)
@@ -414,10 +433,10 @@ async def main():
                         print(f"=== {rid} {name} ===")
                         print(json.dumps(client.raw_for_violation(v), indent=1)[:6000])
                         return None
-                    locs = client.locations(v) or [(None, None)]
-                    for file_, line in locs:
+                    locs = client.locations(v) or [(None, None, None)]
+                    for file_, line, href in locs:
                         out.append({"rule": rid, "file": file_ or "", "line": str(line) if line else "",
-                                    "objectFullName": dr.component_name(v)})
+                                    "fileHref": href, "objectFullName": dr.component_name(v)})
                         if quota is not None and len(out) >= quota:
                             return out
             except dr.RestError as e:
@@ -428,7 +447,16 @@ async def main():
                 return None
             return out
 
-        rows = await triage(resolve_rules(args.rule_ids), fetch, None, args, root)
+        def resolver(v):
+            if not v.get("fileHref"):
+                return None
+            try:
+                return Path(client.download(v["fileHref"], v.get("file")))
+            except dr.RestError as e:
+                print(f"Could not download {v.get('file')}: {e}")
+                return None
+
+        rows = await triage(resolve_rules(args.rule_ids), fetch, None, args, root, resolver)
         if not args.dump:
             write_report(rows, args.out)
         return

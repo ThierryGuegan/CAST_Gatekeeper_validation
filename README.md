@@ -14,21 +14,30 @@ For each selected quality rule the tool
 It builds on the [CAST Gatekeeper MCP server](https://doc.castsoftware.com/imaging/mcp-server/gatekeeper/windows/)
 (tools `get_violations` and `manage_exclusion`).
 
-> **Status:** the checkers are covered by unit tests, and the runner was smoke-tested against a *stubbed*
-> MCP client. It has **not** been run against a live Imaging server. Do a `--dump` run first (see
-> [Quick start](#quick-start)) and review a sample of the false-positive verdicts before creating exclusions.
+> **Status:** the checkers are covered by unit tests. The **REST API mode has been run against a real CAST
+> Dashboard server** and the checkers were calibrated on its violations (see the notes below). The **MCP mode has
+> only been tested against a local stand-in server**, not a real Gatekeeper MCP server: do a `--dump` run first
+> (see [Quick start](#quick-start)). In every mode, review a sample of the false-positive verdicts before creating
+> exclusions.
 
 ## Verdicts
 
 | Verdict | Meaning |
 |---|---|
 | `TRUE_POSITIVE` | The source confirms the violation. |
-| `FALSE_POSITIVE` | The source itself proves the violation is not real (commented out, inside a string, the construct is guarded, the pattern is not a loop, …). The `reason` column says why. |
-| `REVIEW` | Cannot be decided from the source text: metadata, call graph, library version, metric or naming convention is needed, or the code at the reported line is not what the rule expects. |
+| `FALSE_POSITIVE` | The source itself **proves** the violation is not real: the construct only appears in a comment or a string literal, the return code is tested, the table is guarded, the loop is not a loop, and so on. The `reason` column says why. |
+| `REVIEW` | Cannot be decided from the source text. This includes metrics, naming and other rules that need more than the source, and also these automatic cases: the construct is **not found at the reported line** (CAST sometimes anchors a line or two away from the statement, so this is never treated as proof), the line is inside an **AMDP / SQLScript** method (ABAP parsing does not apply), or a SQL-analyzer rule fires on an ABAP file. |
 
 Design rules: a `FALSE_POSITIVE` is returned **only when the file proves it**. When the answer may depend on
 another file (a loop in a caller, a security header configured elsewhere, a check in a caller) the verdict is
 `REVIEW`, or `TRUE_POSITIVE` with the limitation stated in the reason.
+
+**Calibrated on real data.** The checkers were run against the violations of a real application through the REST
+API and corrected where they disagreed with the code (for example: `CALL FUNCTION ... EXCEPTIONS` without a
+`SY-SUBRC` test is still a violation; `sy-subrc = 0.` assigns the return code and does not check it; an
+`IF t[] IS INITIAL ... EXIT.` guard is accepted only when the branch really leaves). Some verdicts show that
+CAST itself over-reports (for example `WHILE ... AND sy-subrc = 0` is a real return-code check), which is where
+the tool saves the most review time.
 
 ## Supported rules
 
@@ -127,23 +136,24 @@ matched under that root; if it does not match exactly, the candidate sharing the
 ## Without the MCP server (Imaging before 3.6.4): CAST Dashboard REST API
 
 With an older Imaging the violations are read **directly from the CAST Dashboard REST API**, the same data the
-dashboard shows. No MCP server, no `mcp` package, no export step.
+dashboard shows. No MCP server, no `mcp` package, no export step, and **no local source checkout is needed**: the
+analysed source files are downloaded from the server, so the line numbers always match the violations.
 
 ```bat
 set CAST_REST_PASSWORD=your-password
 python gatekeeper_validate.py --rest-url http://<server>:<port>/<webservice>/rest --domain <domain> ^
-    --user <user> --app "<application name>" --source-root .\src ^
-    --rule-ids auto --limit 50 --out report.csv
+    --user <user> --app "<application name>" --rule-ids auto --limit 50 --out report.csv
 ```
 
 | Option | Meaning |
 |---|---|
-| `--rest-url` | The REST server root, ending with `/rest` (e.g. `http://localhost:9090/Dashboard-WebService/rest`). |
-| `--domain` | The domain / schema holding the application (e.g. `AAD`, `CENTRAL`). |
+| `--rest-url` | The REST server root, ending with `/rest` (e.g. `http://localhost:9090/Dashboard-WebService/rest`). Opening it in a browser lists the domains. |
+| `--domain` | The domain holding the application's **engineering** data (violations and source code), e.g. `AED` / `CENTRAL`. A measurement-only domain (e.g. `AAD`) has no violations. |
 | `--user` + `--password` | HTTP Basic authentication. The password can come from the `CAST_REST_PASSWORD` environment variable, which keeps it out of your shell history and `run.bat`. |
 | `--api-key` + `--api-user` | Alternative: API key authentication (`X-API-KEY` / `X-API-USER` headers). |
 | `--app` | Application name (case-insensitive). If it is not found, the available names are listed. |
 | `--snapshot` | `latest` (default) or a snapshot number. |
+| `--source-root` | Optional. Only used as a fallback when a file cannot be downloaded (matched by trailing path, so the server's absolute Windows paths are fine). |
 
 What it calls (REST API reference, *Engineering Resources*):
 
@@ -151,23 +161,23 @@ What it calls (REST API reference, *Engineering Resources*):
 GET {rest}/{domain}/applications                                      application by name
 GET {application}/snapshots                                           latest snapshot
 GET {snapshot}/violations?rule-pattern=<rule id>&startRow=&nbRows=    violations of a rule (paged)
-GET <violation>.diagnosis.findings.href                               violation-specific source locations
-GET <violation>.component.sourceCodes.href                            fallback: the object's source location
+GET <violation>.diagnosis.findings.href                               the violating lines (bookmarks -> codeFragment -> file, startLine)
+GET <violation>.component.sourceCodes.href                            fallback: the object's own source location
+GET <file.href>                                                       the analysed source file (text/plain), downloaded once per file
 ```
 
 `--limit`, `--per-rule-limit` and `--rule-ids` work as in the other modes. `--apply-exclusions` is not available in
 this mode (reading only): create the exclusions from the `justification` column of the report.
 
-> **To verify on your server.** The documentation pages this was written from show the violations list in detail,
-> but not the JSON returned by `source-codes` and `findings`, so locations are read generically (any object with a
-> start line and a file). Also, `--rule-ids` passes your quality-rule id (e.g. `7544`) as the API's `rule-pattern`
-> parameter, which accepts a rule pattern id. Run once with `--dump` on one rule: it prints a violation with its
-> findings and source codes. If the locations are not recognised, or the rule ids do not match, send that output
-> and the mapping is a small change.
->
-> ```bat
-> python gatekeeper_validate.py --rest-url ... --domain ... --user ... --app "..." --source-root .\src --rule-ids 7544 --dump
-> ```
+**Verified against a real server** (CAST Dashboard REST API 8.3.50, an application with ABAP, SAPUI5 and HTML5):
+the quality-rule id (e.g. `7544`) works as the `rule-pattern` value, the violating line comes from
+`findings -> bookmarks -> codeFragment`, and the file endpoint returns the analysed source. Other versions or
+servers may differ: if the locations are not recognised, run once with `--dump` on one rule. It prints a violation
+with its findings and source codes.
+
+```bat
+python gatekeeper_validate.py --rest-url ... --domain ... --user ... --app "..." --rule-ids 7544 --dump
+```
 
 ### Offline alternative: an export file
 
@@ -182,7 +192,7 @@ and the `get_violations` shape are accepted, and `--dump` shows how your columns
 | Option | Description |
 |---|---|
 | `--url`, `--api-key`, `--app`, `--source-root` | Required for the MCP server mode (except with `--list-rules`). |
-| `--rest-url`, `--domain`, `--user`/`--password` or `--api-key`/`--api-user`, `--app`, `--source-root` | CAST Dashboard REST API mode (see above). |
+| `--rest-url`, `--domain`, `--user`/`--password` or `--api-key`/`--api-user`, `--app` | CAST Dashboard REST API mode (see above); `--source-root` is optional there. |
 | `--input FILE` | Read the violations from a CSV/JSON export; only `--source-root` is then required. |
 | `--rule-ids` | `auto` (default: every rule with a checker), `abap`, `sapui5`, `web`, `sql`, `all` (auto + review-only), or a comma list such as `7520,1020600,1101114`. |
 | `--snapshot` | `latest` (default), a snapshot number, or `5,6` (as accepted by `get_violations`). |

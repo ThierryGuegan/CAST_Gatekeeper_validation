@@ -102,6 +102,20 @@ def main():
     text, _ = run(["--input", str(csvf), "--source-root", str(src), "--dump"])
     check("--dump describes the mapping", "usable: 6" in text and "rule 7544: 2" in text, text)
 
+    # --- routing: a SQL-analyzer rule firing on an ABAP file (AMDP SQLScript) is review-only
+    (src / "abap" / "zamdp.abap").write_text("METHOD m BY DATABASE PROCEDURE FOR HDB LANGUAGE SQLSCRIPT.\n  SELECT * FROM t1;\nENDMETHOD.\n"
+                                              "SELECT * FROM mara INTO TABLE lt.\n")
+    f8 = tmp / "h.csv"
+    f8.write_text("Rule ID,File,Line\n1101072,abap/zamdp.abap,2\n1101114,abap/zamdp.abap,2\n7528,abap/zprog.abap,1\n7530,abap/zamdp.abap,2\n7530,abap/zamdp.abap,4\n")
+    text, code = run(["--input", str(f8), "--source-root", str(src), "--out", str(out), "--rule-ids", "all"])
+    allrows = list(csv.DictReader(open(out, encoding="utf-8-sig")))
+    rows = {r["rule"]: r for r in allrows if r["rule"] != "7530"}
+    amdp = {r["line"]: r for r in allrows if r["rule"] == "7530"}
+    check("ABAP verdict inside an AMDP method is REVIEW", amdp["2"]["verdict"] == "REVIEW" and "AMDP" in amdp["2"]["reason"], amdp["2"])
+    check("same rule outside the AMDP method is still decided", amdp["4"]["verdict"] == "TRUE_POSITIVE", amdp["4"])
+    check("SQL rule on .abap -> REVIEW with explanation", rows["1101072"]["verdict"] == "REVIEW" and "not parsed" in rows["1101072"]["reason"], rows["1101072"])
+    check("not-found REVIEW is explained", rows["7528"]["verdict"] == "REVIEW" and "line-anchoring" in rows["7528"]["reason"], rows["7528"])
+
     # --- errors
     bad = tmp / "bad.csv"
     bad.write_text("Foo,Bar\n1,2\n")
