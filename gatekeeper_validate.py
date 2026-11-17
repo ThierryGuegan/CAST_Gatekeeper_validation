@@ -3,8 +3,8 @@
 gatekeeper_validate - triage CAST Imaging Gatekeeper violations as true / false positives.
 
 For every selected quality rule the tool
-  1. gets the violations from the Gatekeeper MCP server (tool get_violations, needs Imaging >= 3.6.4)
-     or from an exported CSV/JSON file (--input, works with any Imaging version),
+  1. gets the violations from the Gatekeeper MCP server (tool get_violations, needs Imaging >= 3.6.4),
+     from the CAST Dashboard REST API (--rest-url) or from an exported CSV/JSON file (--input),
   2. reads the source file at the reported line from a local checkout,
   3. runs the rule's checker and classifies the violation
        TRUE_POSITIVE | FALSE_POSITIVE | REVIEW   (REVIEW = cannot be decided from the source),
@@ -18,7 +18,9 @@ Rule families (one checker module each):
                                React, Vue, CSS
   sql     sql_checkers.py      SQL Analyzer: PL/SQL, T-SQL, COBOL embedded SQL (rules 11010xx)
 
-Input:           --url/--api-key/--app (MCP server)  OR  --input violations.csv (no server needed)
+Input (one of):  --url/--api-key/--app          Gatekeeper MCP server (Imaging >= 3.6.4)
+                 --rest-url/--domain/--app     CAST Dashboard REST API (Imaging before 3.6.4), see dashboard_rest.py
+                 --input violations.csv        CSV/JSON export, no server needed
 Rule selection:  --rule-ids auto | abap | sapui5 | web | sql | all | 7520,1020600,...
                  auto = every rule that has a real checker (default)
                  all  = auto + rules that can only get a REVIEW verdict
@@ -37,6 +39,7 @@ from collections import Counter
 from pathlib import Path
 
 import abap_checkers as ac
+import dashboard_rest as dr
 import sapui5_checkers as ui
 import sql_checkers as sq
 import web_checkers as wc
@@ -318,8 +321,15 @@ async def main():
                                              "(ABAP, SAPUI5, SQL, JavaScript/TypeScript/web). See README.md.")
     ap.add_argument("--input", help="read the violations from a CSV/JSON export instead of the MCP server "
                                     "(needs only --source-root; for Imaging versions without the MCP server)")
+    ap.add_argument("--rest-url", help="CAST Dashboard REST API root, ending with the server's /rest/ "
+                                       "(reads the violations through the REST API; Imaging before 3.6.4)")
+    ap.add_argument("--domain", help="REST API domain / schema of the application (e.g. AAD, CENTRAL)")
+    ap.add_argument("--user", help="REST API user (Basic authentication)")
+    ap.add_argument("--password", default=os.environ.get("CAST_REST_PASSWORD"),
+                    help="REST API password (default: environment variable CAST_REST_PASSWORD)")
+    ap.add_argument("--api-user", help="user name sent as X-API-USER when --api-key is used with --rest-url")
     ap.add_argument("--url")
-    ap.add_argument("--api-key")
+    ap.add_argument("--api-key", default=None)
     ap.add_argument("--app")
     ap.add_argument("--source-root")
     ap.add_argument("--rule-ids", default="auto")
@@ -341,15 +351,21 @@ async def main():
             for cat, ids in groups.items():
                 print(f"\nREVIEW only [{lang}] - {cat}:\n  {', '.join(map(str, ids))}")
         return
-    if args.input:
+    if args.input and args.rest_url:
+        ap.error("--input and --rest-url are alternatives, use only one")
+    if args.input or args.rest_url:
         if args.apply_exclusions:
-            ap.error("--apply-exclusions needs the MCP server; with --input use the justification column of the report")
+            ap.error("--apply-exclusions needs the MCP server; use the justification column of the report instead")
         if not args.source_root:
             ap.error("--source-root is required")
+        if args.rest_url:
+            for req in ("domain", "app"):
+                if not getattr(args, req):
+                    ap.error(f"--{req} is required with --rest-url")
     else:
         for req in ("url", "api_key", "app", "source_root"):
             if not getattr(args, req):
-                ap.error(f"--{req.replace('_', '-')} is required (or use --input FILE)")
+                ap.error(f"--{req.replace('_', '-')} is required (or use --rest-url, or --input FILE)")
     root = Path(args.source_root)
 
     if args.input:
@@ -378,6 +394,43 @@ async def main():
             return by_rule[rid]
         rows = await triage(todo, fetch, None, args, root)
         write_report(rows, args.out)
+        return
+
+    if args.rest_url:
+        try:
+            client = dr.DashboardClient(args.rest_url, args.domain, user=args.user, password=args.password,
+                                        api_key=args.api_key, api_user=args.api_user)
+            app = client.find_application(args.app)
+            snap = client.find_snapshot(app, args.snapshot)
+        except dr.RestError as e:
+            sys.exit(f"Dashboard REST API: {e}")
+        print(f"Application '{app.get('name')}', snapshot {snap.get('number')} ({snap.get('href')})")
+
+        async def fetch(rid, quota, name):
+            out = []
+            try:
+                for v in client.iter_violations(snap, rid, limit=None if args.dump else quota):
+                    if args.dump:
+                        print(f"=== {rid} {name} ===")
+                        print(json.dumps(client.raw_for_violation(v), indent=1)[:6000])
+                        return None
+                    locs = client.locations(v) or [(None, None)]
+                    for file_, line in locs:
+                        out.append({"rule": rid, "file": file_ or "", "line": str(line) if line else "",
+                                    "objectFullName": dr.component_name(v)})
+                        if quota is not None and len(out) >= quota:
+                            return out
+            except dr.RestError as e:
+                print(f"[{rid}] REST error, skipped: {e}")
+                return None
+            if args.dump:
+                print(f"=== {rid} {name} ===\nno violation returned")
+                return None
+            return out
+
+        rows = await triage(resolve_rules(args.rule_ids), fetch, None, args, root)
+        if not args.dump:
+            write_report(rows, args.out)
         return
 
     # imported here so --list-rules and --input work without the mcp package
