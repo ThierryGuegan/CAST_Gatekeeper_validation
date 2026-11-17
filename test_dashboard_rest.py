@@ -1,0 +1,178 @@
+"""Run: python3 test_dashboard_rest.py   (starts a fake Dashboard REST server on localhost; no mcp package needed)"""
+import asyncio, base64, contextlib, csv, io, json, sys, tempfile, threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
+from urllib.parse import urlparse, parse_qs
+
+import dashboard_rest as dr
+import gatekeeper_validate as g
+
+FAILS, REQUESTS = [], []
+D = "AAD"
+
+
+def violation(n, comp, with_findings=True):
+    v = {"component": {"href": f"{D}/components/{n}/snapshots/6", "name": comp,
+                       "sourceCodes": {"href": f"{D}/components/{n}/snapshots/6/source-codes", "name": "Source Codes"}},
+         "rulePattern": {"href": f"{D}/rule-patterns/7544"}}
+    if with_findings:
+        v["diagnosis"] = {"findings": {"href": f"{D}/components/{n}/snapshots/6/findings/7544"}}
+    return v
+
+
+# rule 7544: 3 violations (paging test uses nbRows=2); rule 1020060: 1 violation without findings; rule 7520: none
+VIOLATIONS = {"7544": [violation(1, "ZPROG"), violation(2, "ZPROG2"), violation(3, "ZPROG3")],
+              "1020060": [violation(4, "main.js", with_findings=False)], "7520": []}
+FINDINGS = {  # component id -> JSON (shape guessed: bookmarks with file + startLine)
+    1: {"name": "Diagnosis Findings", "values": [{"component": {"name": "ZPROG"}, "bookmarks": [
+        {"file": {"name": "abap/zprog.abap", "href": "x/1"}, "startLine": 1, "endLine": 1}]}]},
+    2: {"name": "Diagnosis Findings", "bookmarks": [{"file": {"name": "abap/zprog.abap"}, "startLine": 2},
+                                                    {"file": {"name": "abap/zprog.abap"}, "startLine": 2}]},
+    3: {"name": "Diagnosis Findings", "values": []},          # no location in the findings -> falls back to source-codes
+}
+SOURCES = {3: [{"file": {"name": "abap/zprog.abap"}, "startLine": 2, "endLine": 4}],
+           4: [{"file": {"name": "web/main.js"}, "startLine": 2}]}
+
+
+class Handler(BaseHTTPRequestHandler):
+    def log_message(self, *a):
+        pass
+
+    def reply(self, code, obj):
+        body = json.dumps(obj).encode()
+        self.send_response(code); self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
+
+    def do_GET(self):
+        u = urlparse(self.path); q = {k: v[0] for k, v in parse_qs(u.query).items()}
+        REQUESTS.append((u.path, q))
+        basic = "Basic " + base64.b64encode(b"bob:pw").decode()
+        ok = self.headers.get("Authorization") == basic or (
+            self.headers.get("X-API-KEY") == "k3y" and self.headers.get("X-API-USER") == "bob")
+        if not ok:
+            return self.reply(401, {"message": "unauthorized"})
+        p = u.path
+        if p == f"/rest/{D}/applications":
+            return self.reply(200, [{"href": f"{D}/applications/3", "name": "MyApp", "snapshots": {"href": f"{D}/applications/3/snapshots"}},
+                                    {"href": f"{D}/applications/4", "name": "Other"}])
+        if p == f"/rest/{D}/applications/3/snapshots":
+            return self.reply(200, [{"href": f"{D}/applications/3/snapshots/5", "number": 1, "annotation": {"date": {"time": 1000}}},
+                                    {"href": f"{D}/applications/3/snapshots/6", "number": 2, "annotation": {"date": {"time": 2000}}}])
+        if p == f"/rest/{D}/applications/3/snapshots/6/violations":
+            allv = VIOLATIONS.get(q.get("rule-pattern"), [])
+            s, n = int(q.get("startRow", 1)), int(q.get("nbRows", 10))
+            return self.reply(200, allv[s - 1:s - 1 + n])
+        parts = p.split("/")                       # /rest/AAD/components/<id>/snapshots/6/<findings/7544|source-codes>
+        if len(parts) > 5 and parts[3] == "components":
+            cid = int(parts[4])
+            if parts[-1] == "source-codes":
+                return self.reply(200, SOURCES.get(cid, []))
+            if "findings" in parts:
+                return self.reply(200, FINDINGS.get(cid, {}))
+        return self.reply(404, {"message": "not found"})
+
+
+def check(name, cond, detail=""):
+    if not cond:
+        FAILS.append(name); print(f"FAIL {name} {detail}")
+
+
+def run(argv):
+    out, code, old = io.StringIO(), 0, sys.argv
+    sys.argv = ["gatekeeper_validate.py", *argv]
+    try:
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            asyncio.run(g.main())
+    except SystemExit as e:
+        code = e.code if isinstance(e.code, int) else 1
+        if isinstance(e.code, str):
+            out.write(e.code)
+    finally:
+        sys.argv = old
+    return out.getvalue(), code
+
+
+def main():
+    srv = HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{srv.server_port}/rest"
+    tmp = Path(tempfile.mkdtemp()); src = tmp / "src"
+    (src / "abap").mkdir(parents=True); (src / "web").mkdir()
+    (src / "abap" / "zprog.abap").write_text(
+        "SELECT SINGLE * FROM mara INTO ls WHERE matnr = p.\nSELECT * FROM mara INTO ls.\n  WRITE ls.\nENDSELECT.\n")
+    (src / "web" / "main.js").write_text('var a = 1;\nconsole.log(1);\n')
+
+    # --- client
+    c = dr.DashboardClient(base, D, user="bob", password="pw")
+    app = c.find_application("myapp")
+    check("application by name, case-insensitive", app["href"] == f"{D}/applications/3")
+    check("latest snapshot by date", c.find_snapshot(app)["number"] == 2)
+    check("snapshot by number", c.find_snapshot(app, "1")["number"] == 1)
+    snap = c.find_snapshot(app)
+    REQUESTS.clear()
+    got = list(c.iter_violations(snap, "7544", page=2))
+    check("paging returns all violations", len(got) == 3, len(got))
+    check("paging uses startRow/nbRows", [(q["startRow"], q["nbRows"]) for p, q in REQUESTS] == [("1", "2"), ("3", "2")], REQUESTS)
+    check("rule-pattern parameter sent", all(q["rule-pattern"] == "7544" for p, q in REQUESTS))
+    check("limit respected", len(list(c.iter_violations(snap, "7544", limit=1))) == 1)
+    check("locations from findings, deduplicated", c.locations(got[1]) == [("abap/zprog.abap", 2)], c.locations(got[1]))
+    check("fallback to source-codes", c.locations(got[2]) == [("abap/zprog.abap", 2)], c.locations(got[2]))
+    check("no location -> empty", c.locations(violation(9, "none", with_findings=False)) == [])
+    k = dr.DashboardClient(base, D, api_key="k3y", api_user="bob")
+    check("api-key authentication", k.find_application("MyApp")["name"] == "MyApp")
+
+    for name, fn, frag in [
+        ("unknown application lists the available ones", lambda: c.find_application("Nope"), "Available: MyApp, Other"),
+        ("wrong password -> 401 hint", lambda: dr.DashboardClient(base, D, user="bob", password="x").find_application("MyApp"), "check the credentials"),
+        ("wrong domain -> 404 hint", lambda: dr.DashboardClient(base, "NOPE", user="bob", password="pw").find_application("MyApp"), "/rest/"),
+        ("unreachable", lambda: dr.DashboardClient("http://127.0.0.1:9/rest", D, user="bob", password="pw").find_application("MyApp"), "Cannot reach"),
+        ("api key without user", lambda: dr.DashboardClient(base, D, api_key="k3y"), "--api-user"),
+        ("no credentials", lambda: dr.DashboardClient(base, D), "No credentials")]:
+        try:
+            fn(); check(name, False, "no error")
+        except dr.RestError as e:
+            check(name, frag in str(e), str(e))
+
+    # --- end to end through the CLI
+    out = tmp / "report.csv"
+    common = ["--rest-url", base, "--domain", D, "--user", "bob", "--password", "pw", "--app", "MyApp",
+              "--source-root", str(src), "--out", str(out)]
+    text, code = run(common + ["--rule-ids", "7544,1020060,7520"])
+    rows = list(csv.DictReader(open(out, encoding="utf-8-sig")))
+    got = sorted((r["rule"], r["line"], r["verdict"], r["object"]) for r in rows)
+    check("exit ok", code == 0, text)
+    check("verdicts from REST data", got == [("1020060", "2", "TRUE_POSITIVE", "main.js"),
+                                             ("7544", "1", "FALSE_POSITIVE", "ZPROG"),
+                                             ("7544", "2", "TRUE_POSITIVE", "ZPROG2"),
+                                             ("7544", "2", "TRUE_POSITIVE", "ZPROG3")], got)
+    check("snapshot announced", "snapshot 2" in text, text)
+    check("justification present for the false positive", any(r["justification"] for r in rows if r["verdict"] == "FALSE_POSITIVE"))
+
+    text, _ = run(common + ["--rule-ids", "7544", "--limit", "2"])
+    check("--limit applies to locations", len(list(csv.DictReader(open(out, encoding="utf-8-sig")))) == 2, text)
+    text, _ = run(common + ["--rule-ids", "7544", "--snapshot", "1"])
+    check("--snapshot number", "snapshot 1" in text, text)
+
+    text, code = run(common + ["--rule-ids", "7544", "--dump"])
+    check("--dump prints the violation, findings and source-codes", '"violation"' in text and '"findings"' in text and "7544" in text, text)
+
+    for argv, frag, name in [
+        (["--rest-url", base, "--domain", D, "--user", "bob", "--password", "pw", "--app", "Nope", "--source-root", str(src)], "Available: MyApp", "unknown app"),
+        (["--rest-url", base, "--domain", D, "--user", "bob", "--password", "bad", "--app", "MyApp", "--source-root", str(src)], "check the credentials", "bad password"),
+    ]:
+        text, code = run(argv)
+        check(f"CLI error: {name}", code != 0 and frag in text and "Traceback" not in text, text)
+    text, code = run(["--rest-url", base, "--user", "bob", "--source-root", str(src), "--app", "MyApp"])
+    check("--domain required", code == 2)
+    text, code = run(common + ["--apply-exclusions"])
+    check("--apply-exclusions refused in REST mode", code == 2)
+    text, code = run(common + ["--input", "x.csv"])
+    check("--input and --rest-url exclusive", code == 2)
+
+    srv.shutdown()
+    print("all passed" if not FAILS else f"{len(FAILS)} failed: {', '.join(FAILS)}")
+    return 1 if FAILS else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

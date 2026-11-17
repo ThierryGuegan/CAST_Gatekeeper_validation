@@ -4,7 +4,8 @@ Triage CAST Imaging **Gatekeeper** violations as true or false positives, automa
 
 For each selected quality rule the tool
 
-1. fetches the violations from the Gatekeeper MCP server (`get_violations`),
+1. gets the violations from the Gatekeeper MCP server (`get_violations`), or **from the CAST Dashboard REST API**
+   (`--rest-url`, for Imaging versions that cannot run the MCP server), or from an exported CSV/JSON file (`--input`),
 2. reads the source file at the reported line from a local checkout,
 3. runs the rule's checker and classifies the violation,
 4. writes a CSV report with the reason, the evidence and a ready-to-use justification,
@@ -85,6 +86,10 @@ pip install mcp
 Both generations of the `mcp` SDK are supported (the older `streamablehttp_client` and the newer
 `streamable_http_client`, whose interface differs); the runner detects which one is installed.
 
+> **Which Imaging version?** The Gatekeeper MCP server (release 3.0.0 and later) requires CAST Imaging
+> **3.6.4 or later**. With an older Imaging (e.g. 2.x) read the violations from the CAST Dashboard REST API instead:
+> see [Without the MCP server](#without-the-mcp-server-imaging-before-364-cast-dashboard-rest-api).
+
 Prerequisites on the Imaging side (see the Gatekeeper MCP documentation): a running Gatekeeper MCP server, an
 Imaging API key, and the **`EXCLUSION_MANAGER`** role if you want to create exclusions. The URL to use is the
 Imaging gateway one: `http://<host>:8090/mcp/gatekeeper` (or `https://<host>/mcp/gatekeeper`), **not** the MCP
@@ -119,11 +124,66 @@ message; set `GATEKEEPER_DEBUG=1` for the full traceback.
 `--source-root` must contain every source language you want checked (ABAP, SQL, JS, …). The reported path is
 matched under that root; if it does not match exactly, the candidate sharing the longest trailing path is used.
 
+## Without the MCP server (Imaging before 3.6.4): CAST Dashboard REST API
+
+With an older Imaging the violations are read **directly from the CAST Dashboard REST API**, the same data the
+dashboard shows. No MCP server, no `mcp` package, no export step.
+
+```bat
+set CAST_REST_PASSWORD=your-password
+python gatekeeper_validate.py --rest-url http://<server>:<port>/<webservice>/rest --domain <domain> ^
+    --user <user> --app "<application name>" --source-root .\src ^
+    --rule-ids auto --limit 50 --out report.csv
+```
+
+| Option | Meaning |
+|---|---|
+| `--rest-url` | The REST server root, ending with `/rest` (e.g. `http://localhost:9090/Dashboard-WebService/rest`). |
+| `--domain` | The domain / schema holding the application (e.g. `AAD`, `CENTRAL`). |
+| `--user` + `--password` | HTTP Basic authentication. The password can come from the `CAST_REST_PASSWORD` environment variable, which keeps it out of your shell history and `run.bat`. |
+| `--api-key` + `--api-user` | Alternative: API key authentication (`X-API-KEY` / `X-API-USER` headers). |
+| `--app` | Application name (case-insensitive). If it is not found, the available names are listed. |
+| `--snapshot` | `latest` (default) or a snapshot number. |
+
+What it calls (REST API reference, *Engineering Resources*):
+
+```
+GET {rest}/{domain}/applications                                      application by name
+GET {application}/snapshots                                           latest snapshot
+GET {snapshot}/violations?rule-pattern=<rule id>&startRow=&nbRows=    violations of a rule (paged)
+GET <violation>.diagnosis.findings.href                               violation-specific source locations
+GET <violation>.component.sourceCodes.href                            fallback: the object's source location
+```
+
+`--limit`, `--per-rule-limit` and `--rule-ids` work as in the other modes. `--apply-exclusions` is not available in
+this mode (reading only): create the exclusions from the `justification` column of the report.
+
+> **To verify on your server.** The documentation pages this was written from show the violations list in detail,
+> but not the JSON returned by `source-codes` and `findings`, so locations are read generically (any object with a
+> start line and a file). Also, `--rule-ids` passes your quality-rule id (e.g. `7544`) as the API's `rule-pattern`
+> parameter, which accepts a rule pattern id. Run once with `--dump` on one rule: it prints a violation with its
+> findings and source codes. If the locations are not recognised, or the rule ids do not match, send that output
+> and the mapping is a small change.
+>
+> ```bat
+> python gatekeeper_validate.py --rest-url ... --domain ... --user ... --app "..." --source-root .\src --rule-ids 7544 --dump
+> ```
+
+### Offline alternative: an export file
+
+If the REST API is not reachable from where you run the tool, give a CSV or JSON export to `--input` instead
+(`--input violations.csv --source-root .\src`). Columns needed (headers are matched loosely): a rule id (`Rule ID`,
+`Metric ID`, ...), a file (`File`, `Path`, ...) and a line (`Line`, `Start line`, ...); `Object` is optional. The
+delimiter (`,` `;` tab) and the encoding (UTF-8 or Windows-1252) are detected, JSON lists, objects keyed by rule id
+and the `get_violations` shape are accepted, and `--dump` shows how your columns were read.
+
 ## Command line
 
 | Option | Description |
 |---|---|
-| `--url`, `--api-key`, `--app`, `--source-root` | Required (except with `--list-rules`). |
+| `--url`, `--api-key`, `--app`, `--source-root` | Required for the MCP server mode (except with `--list-rules`). |
+| `--rest-url`, `--domain`, `--user`/`--password` or `--api-key`/`--api-user`, `--app`, `--source-root` | CAST Dashboard REST API mode (see above). |
+| `--input FILE` | Read the violations from a CSV/JSON export; only `--source-root` is then required. |
 | `--rule-ids` | `auto` (default: every rule with a checker), `abap`, `sapui5`, `web`, `sql`, `all` (auto + review-only), or a comma list such as `7520,1020600,1101114`. |
 | `--snapshot` | `latest` (default), a snapshot number, or `5,6` (as accepted by `get_violations`). |
 | `--limit N` | Check only the first **N violations overall**; rules are processed in order and the run stops at N. |
@@ -194,6 +254,8 @@ python test_abap_checkers.py
 python test_sapui5_checkers.py
 python test_sql_checkers.py
 python test_web_checkers.py
+python test_input_mode.py
+python test_dashboard_rest.py     # starts a fake REST server on localhost
 ```
 
 ## Known limitations
@@ -205,6 +267,8 @@ python test_web_checkers.py
 - **Line anchoring** (which line Imaging reports for each rule) is unverified. Checkers search the nearby
   statements and return `REVIEW` when the code is not what the rule expects, which usually means the checkout does
   not match the analyzed version.
+- **REST API / export files:** the tool trusts the file path and line in the export; if the checkout differs from the analyzed
+  version, results are `REVIEW`.
 - **ABAP:** chained `:` statements are kept as one statement; CDS source is not handled.
 - **SQL:** statements are split on `;`, blank lines and `GO`; T-SQL without any of them can merge neighbouring
   statements. Joins and aliases are analysed for the first top-level `FROM` of a statement only.
