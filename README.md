@@ -268,8 +268,10 @@ A practical way to read it: filter on `FALSE_POSITIVE` and check a sample agains
 |---|---|
 | `ImportError: cannot import name 'streamablehttp_client'` | Old runner with `mcp` 2.x: update (`git pull`); both SDK generations are supported. |
 | `ConnectError: [Errno 11001] getaddrinfo failed` | The host name in `--url` / `--rest-url` does not resolve: you are still using the placeholder (`imaging`, `<server>`). Use the real host. |
-| `HTTP 401 ... check the credentials` | Wrong user/password or API key. In Windows `cmd`, `$VAR` is **not** expanded: use `%VAR%`. In REST mode the password comes from `--password` or `CAST_REST_PASSWORD`. |
-| `HTTP 404 ... check --rest-url and --domain` | `--rest-url` must end with the server's `/rest` root (opening it in a browser lists the domains) and `--domain` must be one of them. |
+| `HTTP 404 ... the server rejected the credentials for user '...'` | Wrong user or password: some servers (including CAST's Dashboard REST API) answer **404, not 401**, to bad credentials. The tool confirms it with the server's `login` endpoint. Check `--user` and the password (`--password` or `CAST_REST_PASSWORD`), including a stray space or line break from pasting; if the password was changed or rotated, use the new one. |
+| `HTTP 404 ... the credentials are accepted but this path does not exist` | `--domain` (or the application name) is wrong. Opening `--rest-url` in a browser lists the domains. |
+| `HTTP 404 ... --rest-url does not look like the server's REST root` | `--rest-url` must end with the server's `/rest` segment. |
+| `HTTP 401 ... check the credentials` | No or invalid credentials. In Windows `cmd`, `$VAR` is **not** expanded: use `%VAR%`. |
 | `HTTP 403` | The user has no access to that domain or application. |
 | `Application 'X' not found ... Available: ...` | `--app` is matched on the exact name (case-insensitive); the message lists the available ones. |
 | No violations for a rule in REST mode | Use the **engineering** domain (e.g. `AED` / `CENTRAL`), not a measurement-only one (e.g. `AAD`). Run with `--rule-ids <id> --dump` to see what the server returns. |
