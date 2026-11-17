@@ -55,9 +55,19 @@ class Handler(BaseHTTPRequestHandler):
         basic = "Basic " + base64.b64encode(b"bob:pw").decode()
         ok = self.headers.get("Authorization") == basic or (
             self.headers.get("X-API-KEY") == "k3y" and self.headers.get("X-API-USER") == "bob")
+        sent = self.headers.get("Authorization") or self.headers.get("X-API-KEY")
+        if not u.path.startswith("/rest/"):                      # not the REST root at all
+            return self.reply(404, {"message": "not found"})
         if not ok:
-            return self.reply(401, {"message": "unauthorized"})
+            if not sent:                                         # like the real server: 401 without credentials...
+                return self.reply(401, {"message": "unauthorized"})
+            body = b"<!doctype html><html><head><title>HTTP Status 404 - Not Found</title></head></html>"
+            self.send_response(404); self.send_header("Content-Type", "text/html")      # ...but 404 for WRONG credentials
+            self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
+            return
         p = u.path
+        if p == "/rest/login":
+            return self.reply(200, True)
         if p == f"/rest/{D}/applications":
             return self.reply(200, [{"href": f"{D}/applications/3", "name": "MyApp", "snapshots": {"href": f"{D}/applications/3/snapshots"}},
                                     {"href": f"{D}/applications/4", "name": "Other"}])
@@ -140,8 +150,12 @@ def main():
 
     for name, fn, frag in [
         ("unknown application lists the available ones", lambda: c.find_application("Nope"), "Available: MyApp, Other"),
-        ("wrong password -> 401 hint", lambda: dr.DashboardClient(base, D, user="bob", password="x").find_application("MyApp"), "check the credentials"),
-        ("wrong domain -> 404 hint", lambda: dr.DashboardClient(base, "NOPE", user="bob", password="pw").find_application("MyApp"), "/rest/"),
+        ("wrong password (server answers 404) -> rejected credentials", lambda: dr.DashboardClient(base, D, user="bob", password="x").find_application("MyApp"), "rejected the credentials for user 'bob'"),
+        ("wrong user -> rejected credentials", lambda: dr.DashboardClient(base, D, user="nobody", password="pw").find_application("MyApp"), "rejected the credentials"),
+        ("password with a trailing space -> rejected credentials", lambda: dr.DashboardClient(base, D, user="bob", password="pw ").find_application("MyApp"), "stray space"),
+        ("wrong api key -> rejected credentials", lambda: dr.DashboardClient(base, D, api_key="bad", api_user="bob").find_application("MyApp"), "rejected the credentials"),
+        ("wrong domain, good credentials -> check --domain", lambda: dr.DashboardClient(base, "NOPE", user="bob", password="pw").find_application("MyApp"), "credentials are accepted"),
+        ("wrong rest url -> not the REST root", lambda: dr.DashboardClient(base + "x", D, user="bob", password="pw").find_application("MyApp"), "REST root"),
         ("unreachable", lambda: dr.DashboardClient("http://127.0.0.1:9/rest", D, user="bob", password="pw").find_application("MyApp"), "Cannot reach"),
         ("api key without user", lambda: dr.DashboardClient(base, D, api_key="k3y"), "--api-user"),
         ("no credentials", lambda: dr.DashboardClient(base, D), "No credentials")]:
@@ -184,7 +198,8 @@ def main():
 
     for argv, frag, name in [
         (["--rest-url", base, "--domain", D, "--user", "bob", "--password", "pw", "--app", "Nope"], "Available: MyApp", "unknown app"),
-        (["--rest-url", base, "--domain", D, "--user", "bob", "--password", "bad", "--app", "MyApp"], "check the credentials", "bad password"),
+        (["--rest-url", base, "--domain", D, "--user", "bob", "--password", "bad", "--app", "MyApp"], "rejected the credentials", "bad password"),
+        (["--rest-url", base, "--domain", "NOPE", "--user", "bob", "--password", "pw", "--app", "MyApp"], "credentials are accepted", "bad domain"),
     ]:
         text, code = run(argv)
         check(f"CLI error: {name}", code != 0 and frag in text and "Traceback" not in text, text)

@@ -38,6 +38,7 @@ class DashboardClient:
         self.base = rest_url.rstrip("/") + "/"
         self.domain = domain.strip("/")
         self.timeout = timeout
+        self.user = api_user or user
         self.headers = {"Accept": "application/json", "X-Client": "gatekeeper_validate"}
         if api_key:
             if not (api_user or user):
@@ -56,6 +57,31 @@ class DashboardClient:
             u += ("&" if "?" in u else "?") + urllib.parse.urlencode(params)
         return u
 
+    def _status(self, u, auth=True):
+        """HTTP status of a GET on `u`, with or without the credentials (None if unreachable)."""
+        headers = self.headers if auth else {"Accept": "application/json"}
+        try:
+            with urllib.request.urlopen(urllib.request.Request(u, headers=headers), timeout=self.timeout) as r:
+                return r.status
+        except urllib.error.HTTPError as e:
+            return e.code
+        except urllib.error.URLError:
+            return None
+
+    def explain_404(self, u):
+        """A 404 can mean three different things; the server's own /login endpoint tells them apart.
+        Some servers answer 404, not 401, to a wrong user or password."""
+        login = self.url("login")
+        if self._status(login, auth=True) == 200:
+            return ("the credentials are accepted but this path does not exist: check --domain (opening --rest-url "
+                    "in a browser lists the domains) and the application name")
+        if self._status(login, auth=False) in (401, 403):
+            who = f" for user '{self.user}'" if self.user else ""
+            return (f"the server rejected the credentials{who}. This server answers 404, not 401, to a wrong user "
+                    f"or password: check --user and the password (--password / CAST_REST_PASSWORD), including a "
+                    f"stray space or line break")
+        return "--rest-url does not look like the server's REST root: it must end with the /rest segment"
+
     def get(self, path, params=None):
         u = self.url(path, params)
         req = urllib.request.Request(u, headers=self.headers)
@@ -63,10 +89,14 @@ class DashboardClient:
             with urllib.request.urlopen(req, timeout=self.timeout) as r:
                 body = r.read().decode("utf-8", "replace")
         except urllib.error.HTTPError as e:
-            hint = {401: "check the credentials", 403: "the user/API key has no access to this domain or application",
-                    404: "check --rest-url and --domain (the path must end with the server's /rest/ root)"}.get(e.code, "")
+            hint = {401: "check the credentials", 403: "the user/API key has no access to this domain or application"}.get(e.code, "")
+            if e.code == 404:
+                hint = self.explain_404(u)
+            body = e.read().decode("utf-8", "replace").strip()
+            if re.match(r"<!doctype|<html", body, re.I):        # an HTML error page adds nothing
+                body = ""
             raise RestError(f"HTTP {e.code} on {u}" + (f" ({hint})" if hint else "") +
-                            f": {e.read().decode('utf-8', 'replace')[:200]}") from None
+                            (f": {body[:200]}" if body else "")) from None
         except urllib.error.URLError as e:
             raise RestError(f"Cannot reach {u}: {e.reason}") from None
         try:
