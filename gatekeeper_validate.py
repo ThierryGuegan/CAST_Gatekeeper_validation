@@ -25,7 +25,9 @@ Input (one of):  --url/--api-key/--app          Gatekeeper MCP server (Imaging >
 Rule selection:  --rule-ids auto | abap | sapui5 | web | sql | all | 7520,1020600,...
                  auto = every rule that has a real checker (default)
                  all  = auto + rules that can only get a REVIEW verdict
-Limits:          --limit N (overall), --per-rule-limit N (per rule)
+Limits:          --limit N (overall), --per-rule-limit N (per rule); both count the violations checked,
+                 true positives included
+Report:          --no-true-positives writes only FALSE_POSITIVE and REVIEW rows to the CSV
 Safety:          dry-run by default; --apply-exclusions needs the EXCLUSION_MANAGER role
 First run:       --dump prints the raw get_violations payload so FIELD_MAP can be checked
 Information:     --list-rules prints every supported rule (no server needed)
@@ -323,13 +325,18 @@ async def triage(rules, fetch, exclude, args, root, resolver=None):
     return rows
 
 
-def write_report(rows, out):
+def write_report(rows, out, hide_true_positives=False):
+    """Write the CSV report. With hide_true_positives the confirmed violations are left out of the file
+    (the console summary still counts them), so the report holds only what needs a human decision."""
     cols = ["rule", "rule_name", "object", "file", "line", "verdict", "reason", "evidence", "justification", "excluded"]
+    kept = [x for x in rows if not (hide_true_positives and x["verdict"] == TP)]
     with open(out, "w", newline="", encoding="utf-8-sig") as f:
         wr = csv.DictWriter(f, fieldnames=cols)
         wr.writeheader()
-        wr.writerows(rows)
+        wr.writerows(kept)
     print(dict(Counter(x["verdict"] for x in rows)), "->", out)
+    if hide_true_positives:
+        print(f"{len(rows) - len(kept)} TRUE_POSITIVE row(s) not written to the report (--no-true-positives)")
     for x in rows:
         if x["verdict"] == FP:
             print(f"FP  {x['rule']}  {x['file']}:{x['line']}  {x['reason']}")
@@ -357,6 +364,9 @@ async def main():
     ap.add_argument("--per-rule-limit", type=int)
     ap.add_argument("--out", default="report.csv")
     ap.add_argument("--dump", action="store_true")
+    ap.add_argument("--no-true-positives", action="store_true",
+                    help="leave the TRUE_POSITIVE rows out of the CSV report (only FALSE_POSITIVE and REVIEW are written); "
+                         "the console summary still counts them")
     ap.add_argument("--apply-exclusions", action="store_true")
     ap.add_argument("--list-rules", action="store_true")
     args = ap.parse_args()
@@ -412,7 +422,7 @@ async def main():
         async def fetch(rid, quota, name):
             return by_rule[rid]
         rows = await triage(todo, fetch, None, args, root)
-        write_report(rows, args.out)
+        write_report(rows, args.out, args.no_true_positives)
         return
 
     if args.rest_url:
@@ -458,7 +468,7 @@ async def main():
 
         rows = await triage(resolve_rules(args.rule_ids), fetch, None, args, root, resolver)
         if not args.dump:
-            write_report(rows, args.out)
+            write_report(rows, args.out, args.no_true_positives)
         return
 
     # imported here so --list-rules and --input work without the mcp package
@@ -495,7 +505,7 @@ async def main():
             rows = await triage(resolve_rules(args.rule_ids), fetch, exclude if args.apply_exclusions else None,
                                 args, root)
     if not args.dump:
-        write_report(rows, args.out)
+        write_report(rows, args.out, args.no_true_positives)
 
 
 def _root_causes(exc):

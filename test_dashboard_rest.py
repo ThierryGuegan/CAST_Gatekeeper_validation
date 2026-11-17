@@ -181,6 +181,10 @@ def main():
 
     text, _ = run(common + ["--rule-ids", "7544", "--limit", "2"])
     check("--limit applies to locations", len(list(csv.DictReader(open(out, encoding="utf-8-sig")))) == 2, text)
+    text, _ = run(common + ["--rule-ids", "7544,1020060", "--no-true-positives"])
+    rows = list(csv.DictReader(open(out, encoding="utf-8-sig")))
+    check("REST mode --no-true-positives: only the false positive is written",
+          [r["verdict"] for r in rows] == ["FALSE_POSITIVE"] and "TRUE_POSITIVE row(s) not written" in text, (rows, text))
     text, _ = run(common + ["--rule-ids", "7544", "--snapshot", "1"])
     check("--snapshot number", "snapshot 1" in text, text)
 
