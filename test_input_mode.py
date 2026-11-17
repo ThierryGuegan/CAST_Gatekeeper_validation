@@ -102,6 +102,18 @@ def main():
     text, _ = run(["--input", str(csvf), "--source-root", str(src), "--dump"])
     check("--dump describes the mapping", "usable: 6" in text and "rule 7544: 2" in text, text)
 
+    # --- --no-true-positives: the CSV keeps only what needs a human decision
+    text, code = run(["--input", str(csvf), "--source-root", str(src), "--out", str(out), "--no-true-positives"])
+    rows = list(csv.DictReader(open(out, encoding="utf-8-sig")))
+    check("--no-true-positives: no TRUE_POSITIVE row in the CSV", rows and all(r["verdict"] != "TRUE_POSITIVE" for r in rows), rows)
+    check("--no-true-positives: the false positive is still there", any(r["verdict"] == "FALSE_POSITIVE" for r in rows), rows)
+    check("--no-true-positives: the summary still counts everything", "'TRUE_POSITIVE': 3" in text and "3 TRUE_POSITIVE row(s) not written" in text, text)
+    text, _ = run(["--input", str(csvf), "--source-root", str(src), "--out", str(out), "--rule-ids", "1020060", "--no-true-positives"])
+    check("--no-true-positives with only true positives: header-only CSV",
+          open(out, encoding="utf-8-sig").read().strip().startswith("rule,rule_name") and len(open(out, encoding="utf-8-sig").read().strip().splitlines()) == 1, open(out, encoding="utf-8-sig").read())
+    text, _ = run(["--input", str(csvf), "--source-root", str(src), "--out", str(out)])
+    check("default still writes the true positives", any(r["verdict"] == "TRUE_POSITIVE" for r in csv.DictReader(open(out, encoding="utf-8-sig"))))
+
     # --- routing: a SQL-analyzer rule firing on an ABAP file (AMDP SQLScript) is review-only
     (src / "abap" / "zamdp.abap").write_text("METHOD m BY DATABASE PROCEDURE FOR HDB LANGUAGE SQLSCRIPT.\n  SELECT * FROM t1;\nENDMETHOD.\n"
                                               "SELECT * FROM mara INTO TABLE lt.\n")

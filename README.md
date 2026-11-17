@@ -230,6 +230,7 @@ and the `get_violations` shape are accepted, and `--dump` shows how your columns
 | `--per-rule-limit N` | Check only the first **N violations per rule**. |
 | `--apply-exclusions` | **MCP mode only.** Create an exclusion (`manage_exclusion`, `add`) for every `FALSE_POSITIVE`. The justification and evidence become the comment (truncated to 900 characters). Default is a dry run. |
 | `--out` | CSV file, default `report.csv`. |
+| `--no-true-positives` | Leave the `TRUE_POSITIVE` rows out of the CSV, so it only holds the `FALSE_POSITIVE` and `REVIEW` rows that need a human decision. The console summary still counts everything (`N TRUE_POSITIVE row(s) not written`). `--limit` and `--per-rule-limit` still count the true positives that were checked. |
 | `--dump` | Print the raw payload and stop: `get_violations` (MCP), or a violation with its findings and source codes (REST), or how an export file's columns were read (`--input`). |
 | `--list-rules` | List the supported rules and exit. |
 
@@ -260,7 +261,8 @@ The `evidence` column holds **excerpts of your source code**: treat `report.csv`
 (it is in `.gitignore`).
 
 A practical way to read it: filter on `FALSE_POSITIVE` and check a sample against the code, then look at `REVIEW`
-(sort by `rule`), and treat `TRUE_POSITIVE` as confirmed.
+(sort by `rule`), and treat `TRUE_POSITIVE` as confirmed. To get a report that contains only those first two
+groups, add `--no-true-positives`.
 
 ## Troubleshooting
 
