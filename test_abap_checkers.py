@@ -75,6 +75,19 @@ CASES = [
     ("7788", "TRY.\n  CATCH cx_root.\n    WRITE 1.\nENDTRY.", 2, FP),
     ("8028", "CASE a.\n  WHEN 1.\n    WRITE 1.\nENDCASE.", 1, TP),
     ("8028", "CASE a.\n  WHEN 1.\n    WRITE 1.\n  WHEN OTHERS.\n    WRITE 2.\nENDCASE.", 1, FP),
+    # --- calibrated on a real report
+    ("7884", "FORM f USING a TYPE i.\n  WRITE 1. \"#EC NEEDED\nENDFORM.", 1, TP),
+    ("7884", "FORM f USING a TYPE i.\n  WRITE 1.\nENDFORM.", 1, RV),
+    ("7884", "BEGIN OF FUNCTION PARAMETERS Z.\nFUNCTION z.\n  DATA x TYPE i ##NEEDED.\nENDFUNCTION.", 1, TP),
+    ("7526", "lv = 'https://host.example.com/a/b'.", 1, TP),
+    ("7526", "CONCATENATE 'cd ' p 'pf=/usr/sap/trans/bin/X.PFL' INTO c.", 1, TP),
+    ("7870", "SELECT * FROM t INTO TABLE lt WHERE NOT a~b LIKE 'X%'.", 1, TP),
+    ("7870", "SELECT * FROM t INTO TABLE lt WHERE a = 1.", 1, RV),
+    ("7808", "DELETE FROM zt WHERE EXISTS ( SELECT 1 FROM @ft AS f WHERE a EQ f~a ).", 1, TP),
+    ("7820", "SELECT FROM t1 AS a INNER JOIN t2 AS b ON ( a~x EQ b~y ) INTO TABLE @lt.", 1, FP),
+    ("8122", "o->m( EXPORTING a = 1 EXCEPTIONS error = 1 OTHERS = 2 ).\nWRITE 1.", 1, TP),
+    ("8122", "o->m( EXPORTING a = 1 EXCEPTIONS error = 1 OTHERS = 2 ).\nIF sy-subrc <> 0.\n  WRITE 1.\nENDIF.", 1, FP),
+    ("7882", "EXEC SQL.\n  OPEN c FOR SELECT a FROM t\nENDEXEC.", 2, TP),
     # --- blocks
     ("7512", "FORM f.\nENDFORM.", 1, TP),
     ("7512", "FORM f.\n  \" nothing\nENDFORM.", 1, TP),
@@ -189,7 +202,7 @@ CASES = [
     ("7858", "*&-----\n*&  Form  X\n*&-----\nFORM x USING VALUE(p) TYPE i.\nENDFORM.", 2, TP),             # reported on the comment header
     ("7536", "LOOP AT lt INTO ls WHERE a = 1.\n  AT NEW b.\n  ENDAT.\nENDLOOP.", 2, TP),                     # reported on the AT line
     ("7536", "LOOP AT lt INTO ls.\n  AT NEW b.\n  ENDAT.\nENDLOOP.", 2, FP),
-    ("7820", "SELECT a FROM t1 AS a INNER JOIN t2 AS b ON b~x = @lv INTO TABLE @lt.", 1, RV),            # ON does not relate the tables
+    ("7820", "SELECT a FROM t1 AS a INNER JOIN t2 AS b ON b~x = @lv INTO TABLE @lt.", 1, TP),            # ON does not relate the tables
     ("7820", "SELECT a FROM t1 AS a INNER JOIN t2 AS b ON b~x = a~x INTO TABLE @lt.", 1, FP),
     ("7524", "* BREAK-POINT.\nWRITE 1.", 1, FP),                                                         # reported line is a comment
     # --- a comment/string verdict must be PROVEN: every occurrence is inside a comment or a literal ----------

@@ -321,6 +321,14 @@ def chk_hardcoded_id(ctx, n):
             hits.append(f"new {cls}(...) created with a hard-coded ID")
     if re.search(r"__(?:xml)?view\d+--", code):
         hits.append("generated view-prefixed ID typed by hand")
+    if not hits and re.match(r"\s*id\s*:\s*([\"'])[^\"'$]+\1\s*,?\s*$", bare):
+        for k in range(n - 1, max(0, n - 13), -1):                     # the id property of a control created just above
+            m = re.search(r"new\s+([\w$.]+)\s*\(\s*\{?\s*$|new\s+([\w$.]+)\s*\(\s*\{", ctx.bare[k - 1])
+            if m:
+                cls = m.group(1) or m.group(2)
+                if re.fullmatch(CONTROL_NS, cls) or cls in ctrl_alias:
+                    hits.append(f"new {cls}({{ id: ... }}) created with a hard-coded ID (line {k})")
+                break
     if hits:
         return TP, "Hard-coded control ID: " + "; ".join(hits), ctx.ev(a, z)
     if re.search(r"(?:this|oView|that|_this)\s*\.\s*(?:getView\(\)\s*\.\s*)?byId\s*\(|\.createId\s*\(", bare):
@@ -400,9 +408,9 @@ def chk_crud_keys(ctx, n):
     if not ctx.ok(n):
         return NOLINE
     code, bare, a, z = ctx.span(n)
-    m = re.search(r"([\w$.()\s]*?)\.\s*(create|update|remove|delete)\s*\(", bare)
+    m = re.search(r"([\w$.()\s]*?)\.\s*(create|update|remove|delete|read)\s*\(", bare)
     if not m:
-        return RV, "Expected an OData create/update/remove call at the reported line", ctx.ev(a, z)
+        return RV, "Expected an OData create/read/update/remove call at the reported line", ctx.ev(a, z)
     recv, op = m.group(1), m.group(2)
     if not re.search(r"model|odata", recv, re.I) and not re.search(r"getModel\s*\(", recv):
         return RV, f"The receiver '{recv.strip()}' is not recognisably an OData model", ctx.ev(a, z)

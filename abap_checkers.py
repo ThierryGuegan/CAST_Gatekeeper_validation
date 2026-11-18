@@ -692,9 +692,23 @@ def chk_cartesian(ctx, n):                                          # 7820, 7660
     joins, ons = len(re.findall(r"\bJOIN\b", s.up)), len(re.findall(r"\bON\b", s.up))
     if joins > ons:
         return TP, f"{joins} JOIN(s) but only {ons} ON condition(s): a join without condition is a cartesian product", s.text
-    rels = sum(1 for m in re.finditer(r"([\w@]+)~\w+\s*=\s*([\w@]+)~\w+", s.up) if m.group(1) != m.group(2))
-    if joins and rels < joins:
-        return RV, f"Every JOIN has an ON condition, but only {rels} comparison(s) relate two tables for {joins} join(s): check for a cartesian product", s.text
+    unrelated, unknown = [], 0
+    for part in re.split(r"\bJOIN\b", s.up)[1:]:
+        part = re.split(r"\b(?:WHERE|FIELDS|GROUP BY|ORDER BY|INTO|APPENDING|UP TO|HAVING|FOR ALL ENTRIES|BYPASSING)\b", part)[0]
+        m = re.search(r"\bON\b(.*)", part, re.S)
+        cond = m.group(1) if m else ""
+        aliases = set(re.findall(r"([A-Z_][\w/]*)~[\w/]+", cond))
+        if len(aliases) >= 2:
+            continue
+        if aliases:
+            unrelated.append(part.strip()[:50])
+        else:
+            unknown += 1                       # unqualified columns: cannot tell which tables they belong to
+    if unrelated:
+        return TP, (f"The ON condition of a JOIN compares columns of one table only with variables/constants, so the "
+                    f"joined table is not related to the others (cartesian product): JOIN {unrelated[0]} ..."), s.text
+    if unknown:
+        return RV, "A JOIN condition uses unqualified columns: cannot tell whether it relates the joined tables", s.text
     return FP, "Every JOIN has an ON condition relating the joined tables", s.text
 
 
@@ -861,21 +875,51 @@ def chk_empty_catch(ctx, n):                                        # 1104018, 1
 INSPECTION_OFF = re.compile(r"\"\s*#\s*EC\b|##\s*[A-Za-z_]|\*\s*#\s*EC\b", re.I)
 
 
+ARTIFACT_OPEN = re.compile(r"^(FORM|METHOD|FUNCTION|MODULE)(?![\w-])")
+
+
+def _first_directive(ctx, lo, hi):
+    """(line, text) of the first pseudo-comment / pragma between lines lo and hi (1-based, inclusive), or None."""
+    for k in range(max(1, lo), min(len(ctx.lines), hi) + 1):
+        line = ctx.lines[k - 1]
+        for m in INSPECTION_OFF.finditer(line):
+            if where_in_line(line, m.start()) != "string":
+                return k, line.strip()[:90]
+    return None
+
+
 def chk_inspection_off(ctx, n):                                     # 7884
     i = ctx.stmt_at(n)
     if i is None:
         return NOSTMT
     s = ctx.stmts[i]
-    for k in range(max(1, s.first - 1), min(len(ctx.lines), s.last + 1) + 1):
-        line = ctx.lines[k - 1]
-        for m in INSPECTION_OFF.finditer(line):
-            if where_in_line(line, m.start()) != "string":
-                return TP, f"Code inspection is switched off at line {k}: {line.strip()[:90]}", s.text
-    return RV, (f"No pseudo-comment (\"#EC ...) or pragma (##...) in the statement at line {n}: CAST may anchor the "
-                f"violation elsewhere, or the source differs from the analyzed version"), s.text
+    hit = _first_directive(ctx, s.first - 1, s.last + 1)
+    if hit:
+        return TP, f"Code inspection is switched off at line {hit[0]}: {hit[1]}", s.text
+    # CAST anchors this rule on the artifact (FORM / METHOD / function module / declaration) that contains the
+    # pseudo-comment or pragma, not on the line that carries it: look in the whole artifact
+    lo, hi, what = s.first, len(ctx.lines), "file"
+    if ARTIFACT_OPEN.match(s.up):
+        kw = s.up.split()[0]
+        end = ctx.block_end(i, re.compile(r"^" + kw + r"(?![\w-])"), re.compile(r"^END" + kw + r"(?![\w-])"))
+        if end is not None:
+            hi, what = ctx.stmts[end].last, kw
+    elif s.up.startswith("BEGIN OF FUNCTION PARAMETERS"):
+        what = "function module"
+    else:
+        lo = 1
+    hit = _first_directive(ctx, lo, hi)
+    if hit:
+        return TP, (f"Code inspection is switched off at line {hit[0]} of this {what}: {hit[1]} "
+                    f"(CAST reports the artifact, here at line {n})"), s.text
+    return RV, (f"No pseudo-comment (\"#EC ...) or pragma (##...) found in the statement at line {n} nor in the enclosing "
+                f"{what}: it may be in another include, or the source differs from the analyzed version"), s.text
 
 
-STRONG_PATH = re.compile(r"^(?:[A-Za-z]:[\\/]|\\\\[\w$.-]+\\|/(?:usr|tmp|home|var|opt|data|mnt|sapmnt|interfaces|etc|srv|export|nfs)(?:/|$))")
+URL_IN_LITERAL = re.compile(r"\b(?:https?|ftps?|sftp)://[^\s'`\"]+", re.I)
+PATH_IN_LITERAL = re.compile(
+    r"(?<![\w:/.-])(?:[A-Za-z]:[\\/][^\s'`]*|\\\\[\w$.-]+\\[^\s'`]*|"
+    r"/(?:usr|tmp|home|var|opt|data|mnt|sapmnt|interfaces|etc|srv|export|nfs|int)(?:/[\w.$*-]*)*)")
 WEAK_PATH = re.compile(r"^/[\w.-]*[a-z][\w.-]*/[\w./-]+")
 
 
@@ -885,12 +929,18 @@ def chk_hardcoded_path(ctx, n):                                     # 7526
         return NOSTMT
     s = ctx.stmts[i]
     lits = [a or b for a, b in re.findall(r"'([^']*)'|`([^`]*)`", s.text)]
-    strong = [x for x in lits if STRONG_PATH.match(x.strip())]
-    if strong:
-        return TP, f"Hard-coded file path {strong[0]!r} in the statement at line {s.first}", s.text
-    weak = [x for x in lits if WEAK_PATH.match(x.strip())]
-    if weak:
-        return RV, f"The literal {weak[0]!r} looks like a path or a URL; decide whether it is a file path", s.text
+    for x in lits:
+        m = PATH_IN_LITERAL.search(x)
+        if m:
+            return TP, f"Hard-coded file path {m.group(0)!r} in the statement at line {s.first}", s.text
+    for x in lits:
+        m = URL_IN_LITERAL.search(x)
+        if m:
+            return TP, (f"Hard-coded URL {m.group(0)[:70]!r} in the statement at line {s.first} "
+                        f"(CAST counts it as a hard-coded path)"), s.text
+    for x in lits:
+        if WEAK_PATH.match(x.strip()):
+            return RV, f"The literal {x!r} looks like a path or a URL; decide whether it is a file path", s.text
     return RV, f"No path literal in the statement at line {n} (CAST may anchor it elsewhere)", s.text
 
 
@@ -1094,14 +1144,29 @@ reg(7528, "Never use the ON CHANGE OF statement", K(r"^ON CHANGE OF(?![\w-])", "
 reg(7592, 'Avoid using "ORDER BY" in SELECTS', K(r"\bORDER BY\b", "ORDER BY clause", SELECT_START))
 reg(7594, 'Avoid using "SELECT DISTINCT"', K(r"\bDISTINCT\b", "SELECT DISTINCT", SELECT_START))
 reg(7866, "Avoid SELECT ... BYPASSING BUFFER", K(r"\bBYPASSING BUFFER\b", "BYPASSING BUFFER addition"))
-reg(7870, "Avoid using the NOT LIKE operator in WHERE clauses", K(r"\bNOT\s+LIKE\b", "NOT LIKE operator", SQL_START))
+reg(7870, "Avoid using the NOT LIKE operator in WHERE clauses", K(r"\bNOT\s+(?:[\w~\-\[\]<>/@]+\s+)?LIKE\b", "NOT LIKE operator", SQL_START))
 reg(7872, "Avoid using IS [NOT] NULL in WHERE condition", K(r"\bIS\s+(NOT\s+)?NULL\b", "IS [NOT] NULL", SQL_START))
 reg([7874, 1101024], "Avoid using dynamic queries", K(DYN, "dynamic SQL token (...)", SQL_START))
 reg(7876, "Avoid using SELECT ... FOR UPDATE", K(r"\bFOR UPDATE\b", "FOR UPDATE addition"))
-reg(7882, "Avoid using Native SQL", K(r"^EXEC SQL(?![\w-])|\bCL_SQL_(STATEMENT|CONNECTION)\b", "Native SQL (EXEC SQL / ADBC)"))
+_native = K(r"^EXEC SQL(?![\w-])|\bCL_SQL_(STATEMENT|CONNECTION)\b", "Native SQL (EXEC SQL / ADBC)")
+
+
+def chk_native_sql(ctx, n):                                         # 7882
+    i = ctx.stmt_at(n)
+    if i is not None:
+        for k in range(i, max(-1, i - 400), -1):
+            u = ctx.stmts[k].up
+            if re.match(r"^EXEC SQL(?![\w-])", u):
+                return TP, f"The line is inside the EXEC SQL ... ENDEXEC block opened at line {ctx.stmts[k].first}", ctx.stmts[i].text
+            if k != i and "ENDEXEC" in u:
+                break
+    return _native(ctx, n)
+
+
+reg(7882, "Avoid using Native SQL", chk_native_sql)
 reg(7886, "Avoid using SYSTEM-CALL", K(r"^SYSTEM-CALL(?![\w-])", "SYSTEM-CALL statement"))
 reg([7806, 1101018], "Avoid Artifacts with Group By", K(r"\bGROUP BY\b", "GROUP BY clause", SELECT_START))
-reg(7808, "Avoid Artifacts with SQL statement including subqueries", K(r"\(\s*SELECT\b", "subquery", SELECT_START))
+reg(7808, "Avoid Artifacts with SQL statement including subqueries", K(r"\(\s*SELECT\b", "subquery", SQL_START))
 reg(8116, "Avoid calling system function (CALL 'cfunc')", K(r"^CALL\s+['`]", "CALL 'cfunc' statement"))
 reg(8118, "Avoid using the RFC_ABAP_INSTALL_AND_RUN function", K(r"RFC_ABAP_INSTALL_AND_RUN", "RFC_ABAP_INSTALL_AND_RUN call", literals=True))
 reg(8124, "Do not use function module DB_EXISTS_INDEX (HANA)", K(r"DB_EXISTS_INDEX", "DB_EXISTS_INDEX call", literals=True))
@@ -1125,8 +1190,10 @@ def chk_call_error_handling(kind):
         i, j = anchor(ctx, n, start, 2)
         if i is None:
             return NOSTMT
+        if j is None and kind == "METHOD" and re.search(r"\(.*\bEXCEPTIONS\b", ctx.stmts[i].up):
+            j = i                              # functional call  obj->method( ... EXCEPTIONS ... ): same rule
         if j is None:
-            return RV, f"No CALL {kind} statement at the reported line (functional call syntax is not analysed)", ctx.ev(i)
+            return RV, f"No CALL {kind} statement at the reported line (functional call without EXCEPTIONS is not analysed)", ctx.ev(i)
         s = ctx.stmts[j]
         if re.search(r"\bOTHERS\s*=\s*0\b", s.up):
             return TP, "EXCEPTIONS OTHERS = 0 explicitly ignores every error: SY-SUBRC stays 0", s.text

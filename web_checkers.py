@@ -328,7 +328,13 @@ def chk_function_in_loop(ctx, n):                                    # 1020038
 def chk_call_in_loop_condition(ctx, n):                              # 1020006
     if not ctx.ok(n):
         return NOLINE
-    text = " ".join(ctx.bare[n - 1:n + 2])
+    first = n
+    if not re.search(r"\bfor\s*\(", ctx.bare[n - 1]):             # the header can span lines: start at the 'for (' above
+        for k in (n - 1, n - 2):
+            if k >= 1 and re.search(r"\bfor\s*\([^)]*$", ctx.bare[k - 1]):
+                first = k
+                break
+    text = " ".join(ctx.bare[first - 1:n + 2])
     loops = []                                       # (has_call, condition) of EVERY for(;;) loop of the window
     for m in re.finditer(r"\bfor\s*\(", text):
         depth, k = 0, m.end() - 1
