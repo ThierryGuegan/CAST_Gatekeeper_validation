@@ -140,6 +140,11 @@ def main():
     text, code = run(["--source-root", str(src)])
     check("MCP args still required without --input", code == 2)
 
+    text, code = run(["--version"])
+    check("--version prints the version and exits", code == 0 and text.startswith("gatekeeper_validate ") and text.count("\n") == 1, text)
+    text, _ = run(["--list-rules"])
+    check("every run starts with the version line", text.startswith("gatekeeper_validate "), text[:80])
+
     # ids shared by ABAP and JS/TS (7788, 7884, 7526, 8028, 8032) are routed by file extension
     for rid, f, fam in [("8028", "a.controller.js", "web"), ("8028", "z.abap", "abap"), ("7788", "a.ts", "web"),
                         ("7788", "z.abap", "abap"), ("7884", "a.js", "web"), ("7884", "z.abap", "abap"),
