@@ -3,5 +3,4 @@ __pycache__/
 report.csv
 *.abap
 /src_test
-run.bat
-run.bat
+run.local.bat
