@@ -37,6 +37,11 @@ class RestError(Exception):
     pass
 
 
+class UnknownRule(RestError):
+    """The rule is not part of the quality model of this domain (HTTP 400 'rule-pattern is unknown'):
+    nothing to check, not a failure."""
+
+
 # A long run makes thousands of requests. Servers, proxies and firewalls sometimes close a connection
 # (WinError 10054 / "connection reset by peer"); that is retried a few times before giving up.
 RETRIES = 4                      # attempts per request
@@ -127,6 +132,8 @@ class DashboardClient:
             if e.code == 404:
                 hint = self.explain_404(u)
             body = e.read().decode("utf-8", "replace").strip()
+            if e.code == 400 and "rule-pattern is unknown" in body:
+                raise UnknownRule(body) from None
             if re.match(r"<!doctype|<html", body, re.I):        # an HTML error page adds nothing
                 body = ""
             raise RestError(f"HTTP {e.code} on {u}" + (f" ({hint})" if hint else "") +
