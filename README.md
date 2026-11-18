@@ -69,7 +69,7 @@ before trusting its verdicts.
 
 | Family | Module | Technologies / files | Rule ids with a checker | Review-only ids |
 |---|---|---|---|---|
-| `abap` | `abap_checkers.py` | ABAP (TG001, `com.castsoftware.sap`) | 72 | 85 |
+| `abap` | `abap_checkers.py` | ABAP (TG001, `com.castsoftware.sap`) | 76 | 95 |
 | `sapui5` | `sapui5_checkers.py` | SAPUI5 extension (`10206xx`): JS, `manifest.json`, `index.html` | 10 | – |
 | `web` | `web_checkers.py` | TG004: HTML5/JavaScript, TypeScript, Node.js, jQuery, AngularJS/Angular, React, Vue, CSS | 209 | 74 |
 | `sql` | `sql_checkers.py` | SQL Analyzer: PL/SQL, T-SQL, COBOL embedded SQL (`11010xx`) | 38 | 21 |
@@ -303,7 +303,7 @@ groups, add `--no-true-positives`.
 ```
 gatekeeper_validate.py        runner: input modes (REST / MCP / file), rule selection, limits, CSV, exclusions, routing
 ├── dashboard_rest.py         CAST Dashboard REST API client (applications, snapshots, violations, locations, source download)
-├── abap_checkers.py          ABAP statement parser (+ AMDP detection) + 72 rule ids
+├── abap_checkers.py          ABAP statement parser (+ AMDP detection) + 76 rule ids
 ├── sapui5_checkers.py        JsCtx (JS/JSON/HTML/CSS aware of comments and strings) + SAPUI5 rules
 ├── web_checkers.py           TG004 rules (brace/loop/try/switch/finally aware, cookies, Node, Angular, Vue, jQuery, CSS)
 └── sql_checkers.py           SQL statement splitter, FROM/JOIN parser, PL/SQL & T-SQL loops, tables/keys
