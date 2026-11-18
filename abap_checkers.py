@@ -918,12 +918,20 @@ def _method_impl_directive(ctx, s):
     if path is None or not names:
         return None
     prefix = path.stem[:30].casefold()
+    aux = getattr(ctx, "aux", None)
+    if aux:                                   # REST mode: the server gave the component's other source files
+        try:
+            siblings = list(aux())
+        except Exception:
+            siblings = []
+    else:
+        siblings = []
     try:
-        siblings = [p for p in path.parent.iterdir()
-                    if p.suffix.lower() == ".abap" and p.stem[:30].casefold() == prefix
-                    and p.stem[30:32].upper() == "CM"]
+        siblings += [p for p in path.parent.iterdir()
+                     if p.suffix.lower() == ".abap" and p.stem[:30].casefold() == prefix
+                     and p.stem[30:32].upper() == "CM"]
     except OSError:
-        return None
+        pass
     for name in names:
         rx = re.compile(r"^\s*METHOD\s+" + re.escape(name) + r"\s*\.", re.I)
         for p in sorted(siblings):
@@ -1219,7 +1227,32 @@ def chk_native_sql(ctx, n):                                         # 7882
                 return TP, f"The line is inside the EXEC SQL ... ENDEXEC block opened at line {ctx.stmts[k].first}", ctx.stmts[i].text
             if k != i and "ENDEXEC" in u:
                 break
-    return _native(ctx, n)
+    res = _native(ctx, n)
+    if res[0] == TP or i is None:
+        return res
+    # CAST also reports lines of the same FORM / METHOD that are not part of the EXEC SQL block (seen with
+    # EXEC "#EC CI_EXECSQL ... SQL. blocks): the artifact does use Native SQL
+    art = _enclosing_artifact(ctx, i)
+    if art:
+        for k in range(art[0], art[1] + 1):
+            if re.match(r"^EXEC SQL(?![\w-])", ctx.stmts[k].up):
+                return TP, (f"The {ctx.stmts[art[0]].up.split()[0]} that contains this line uses Native SQL "
+                            f"(EXEC SQL at line {ctx.stmts[k].first}); CAST reports line {n} of the same artifact"), res[2]
+    return res
+
+
+def _enclosing_artifact(ctx, i):
+    """(first, last) statement index of the FORM / METHOD / FUNCTION / MODULE that contains statement i."""
+    for k in range(i, -1, -1):
+        u = ctx.stmts[k].up
+        m = ARTIFACT_OPEN.match(u)
+        if m:
+            kw = m.group(1)
+            end = ctx.block_end(k, re.compile(r"^" + kw + r"(?![\w-])"), re.compile(r"^END" + kw + r"(?![\w-])"))
+            return (k, end) if end is not None and end >= i else None
+        if re.match(r"^END(FORM|METHOD|FUNCTION|MODULE)(?![\w-])", u):
+            return None
+    return None
 
 
 reg(7882, "Avoid using Native SQL", chk_native_sql)
