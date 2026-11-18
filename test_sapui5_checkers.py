@@ -60,6 +60,10 @@ CASES = [
     ("1020612", "js", DEF + "var b = new Date();\nb.foo = function() {};", 3, FP),
     ("1020612", "js", "var a = 1;", 1, RV),
     # CRUD keys
+    ("1020616", "js", "oModel.read(\"/NewsSet('\" + valeur + \"')\", { success: function (d) {} });", 1, TP),
+    ("1020616", "js", "oModel.read(\"/NewsSet\", { success: function (d) {} });", 1, RV),
+    ("1020608", "js", "var oBar = new sap.m.FilterBar({\n  id: \"filterBarSearch\",\n  showGoButton: true\n});", 2, TP),
+    ("1020608", "js", "var o = { \n  id: \"x\",\n};", 2, RV),
     ("1020616", "js", "oModel.update(\"/Products('\" + sId + \"')\", oData);", 1, TP),
     ("1020616", "js", "oModel.update(oModel.createKey('/Products', {Id: 1}), oData);", 1, FP),
     ("1020616", "js", "var sPath = oModel.createKey('/Products', {Id: 1});\noModel.remove(sPath);", 2, FP),

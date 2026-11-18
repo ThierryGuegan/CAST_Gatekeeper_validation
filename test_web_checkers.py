@@ -69,6 +69,8 @@ CASES = [
     ("1020016", "js", "x = a.b.c.d.e;", 1, RV),
     ("1020016", "js", "for (var i = 0; i < n; i++) {\n  x = a.b;\n}", 2, RV),
     ("1020016", "js", "while (ok) {\n  var v = 1.5 + 2.5;\n}", 2, RV),
+    ("1020006", "js", "for (var i = 0;\n     i < a.getItems().length;\n     i++) {\n}", 2, TP),
+    ("1020006", "js", "for (var i = 0;\n     i < n;\n     i++) {\n}", 2, FP),
     # ids shared with ABAP (JS/TS files)
     ("8028", "js", "switch (a) {\n  case 1: break;\n}", 1, TP),
     ("8028", "js", "switch (a) {\n  case 1: break;\n  default: break;\n}", 1, FP),
