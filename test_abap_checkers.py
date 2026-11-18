@@ -64,6 +64,8 @@ CASES = [
     ("7884", "SELECT * FROM mara INTO ls.  \"#EC CI_NOWHERE\nENDSELECT.", 1, TP),
     ("7884", "DATA lv TYPE i ##NEEDED.", 1, TP),
     ("7884", "DATA lv TYPE i.", 1, RV),
+    ("7882", "FORM f.\n  IF a = 1.\n    EXEC \"#EC CI_EXECSQL\n      SQL.\n      CLOSE c\n    ENDEXEC.\n  ELSEIF b = 2.\n    PERFORM x.\n  ENDIF.\nENDFORM.", 7, TP),
+    ("7882", "FORM g.\n  IF a = 1.\n    PERFORM y.\n  ENDIF.\nENDFORM.", 3, RV),
     ("7884", "WRITE 'a ##b'.", 1, RV),
     ("7526", "OPEN DATASET 'C:\\temp\\out.txt' FOR OUTPUT IN TEXT MODE ENCODING DEFAULT.", 1, TP),
     ("7526", "lv_file = '/usr/sap/trans/data/x.txt'.", 1, TP),
