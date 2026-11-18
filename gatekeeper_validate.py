@@ -351,8 +351,10 @@ async def triage(rules, fetch, exclude, args, root, resolver=None):
             if remaining is not None and remaining <= 0:
                 break
             name = rule_name(rid)
+            if name is None and getattr(args, "dump", False):
+                name = "(no checker for this rule)"          # --dump shows the raw violations of any rule
             if name is None:
-                print(f"[{rid}] unknown rule id, skipped (see --list-rules)")
+                print(f"[{rid}] no checker for this rule id, skipped (see --list-rules; --dump shows its raw violations)")
                 continue
             quota = min((x for x in (remaining, args.per_rule_limit) if x is not None), default=None)
             viols = await fetch(rid, quota, name)
