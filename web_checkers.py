@@ -72,6 +72,29 @@ def stack_at(ctx, n):
     return list(bm[n - 1]) if 1 <= n <= len(bm) else []
 
 
+def stack_at_col(ctx, n, col):
+    """Block stack at character `col` of line n (blocks opened earlier on the same line included)."""
+    stack = list(stack_at(ctx, n))
+    line = ctx.bare[n - 1]
+    i = 0
+    while i < len(line) and line[i] in " \t}":
+        i += 1
+    header, pd = "", 0
+    for ch in line[i:col]:
+        if ch == "{":
+            stack.append(_classify(header)); header = ""
+        elif ch == "}":
+            if stack:
+                stack.pop()
+            header = ""
+        elif ch == ";" and pd <= 0:
+            header = ""
+        else:
+            pd = max(pd + (ch == "(") - (ch == ")"), 0)
+            header += ch
+    return stack
+
+
 def enclosing_loop(ctx, n, kinds=LOOPS):
     for k in reversed(stack_at(ctx, n)):
         if k in kinds:
@@ -149,36 +172,70 @@ def chk_empty_did_catch(ctx, n):                                     # 1020452, 
     return FP, "componentDidCatch handles the error", _ev(ctx, n, end)
 
 
-def chk_switch_default(ctx, n):                                      # 1020180
+def chk_switch_default(ctx, n):                                      # 1020180, 8028
     if not ctx.ok(n):
         return NOLINE
-    body, end, m = body_after(ctx, n, r"\bswitch\b[^{]*\{")
-    if m is None:
+    text = "\n".join(ctx.bare[n - 1:n - 1 + 80])
+    first_len = len(ctx.bare[n - 1])
+    starts = [m for m in re.finditer(r"\bswitch\b[^{]*\{", text) if m.start() <= first_len]
+    if not starts:
         return RV, "No switch statement at the reported line", _ev(ctx, n)
-    if body is None:
-        return RV, "Could not match the switch braces", _ev(ctx, n)
-    depth = 0
-    for k, ch in enumerate(body):
-        depth += (ch == "{") - (ch == "}")
-        if depth == 0 and re.match(r"\bdefault\s*:", body[k:]):
-            return FP, "The switch has a default clause", _ev(ctx, n, end)
-    return TP, "switch statement without a default clause", _ev(ctx, n, end)
+    missing = total = 0
+    for m in starts:
+        k = m.end() - 1
+        depth, end = 0, None
+        for j in range(k, len(text)):
+            depth += (text[j] == "{") - (text[j] == "}")
+            if depth == 0:
+                end = j
+                break
+        if end is None:
+            return RV, "Could not match the switch braces", _ev(ctx, n)
+        body, d, has = text[k + 1:end], 0, False
+        for q, ch in enumerate(body):
+            d += (ch == "{") - (ch == "}")
+            if d == 0 and re.match(r"\bdefault\s*:", body[q:]):
+                has = True
+                break
+        total += 1
+        missing += not has
+    zz = n + text[:end].count("\n")
+    if missing:
+        return TP, (f"switch statement without a default clause" if total == 1 else
+                    f"{missing} of the {total} switch statements starting on this line have no default clause"), _ev(ctx, n, zz)
+    return FP, ("The switch has a default clause" if total == 1 else
+                f"All {total} switch statements starting on this line have a default clause"), _ev(ctx, n, zz)
 
 
-def chk_break_in_for(ctx, n):                                        # 1020182
+def chk_break_in_for(ctx, n):                                        # 1020182, 8032
     if not ctx.ok(n):
         return NOLINE
-    if not re.search(r"\bbreak\b", ctx.bare[n - 1]):
+    line = ctx.bare[n - 1]
+    brks = [m for m in re.finditer(r"\bbreak\b", line)]
+    if not brks:
         return RV, "No break statement at the reported line", _ev(ctx, n)
-    if re.search(r"\bbreak\s+[A-Za-z_$]", ctx.bare[n - 1]):
-        return RV, "Labeled break: the target loop must be checked manually", _ev(ctx, n)
-    for k in reversed(stack_at(ctx, n)):
-        if k == "for":
-            return TP, "break inside a for loop", _ev(ctx, n)
-        if k in ("switch", "while", "do", "iterfn", "function"):
-            why = {"switch": "break leaves a switch, not a for loop"}.get(k, f"the break is in a {k}, not a for loop")
-            return FP, why, _ev(ctx, n)
-    return RV, "break outside any recognisable loop/switch", _ev(ctx, n)
+    seen = set()
+    for m in brks:
+        if re.match(r"\s*[A-Za-z_$]", line[m.end():]) and not re.match(r"\s*(?:case|default)\b", line[m.end():]):
+            return RV, "Labeled break: the target loop must be checked manually", _ev(ctx, n)
+        for k in reversed(stack_at_col(ctx, n, m.start())):
+            if k == "for":
+                return TP, "break inside a for loop", _ev(ctx, n)
+            if k in ("switch", "while", "do"):
+                seen.add(k)
+                break
+            if k in ("iterfn", "function"):
+                seen.add("function")
+                break
+        else:
+            seen.add("none")
+    if seen <= {"switch"}:
+        return FP, "break leaves a switch, not a for loop", _ev(ctx, n)
+    if seen <= {"switch", "while", "do"}:
+        return FP, f"the break is in a {sorted(seen - {'switch'})[0]} loop, not a for loop", _ev(ctx, n)
+    near = " ".join(ctx.bare[max(0, n - 4):n])
+    return RV, ("No enclosing for/while/switch block was found for the break (brace-less loop, unusual layout or a "
+                "different anchor line)" + (": a 'for' appears a few lines above" if re.search(r"\bfor\s*\(", near) else "")), _ev(ctx, n)
 
 
 def chk_function_in_loop(ctx, n):                                    # 1020038
