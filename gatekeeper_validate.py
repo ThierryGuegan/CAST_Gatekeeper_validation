@@ -347,6 +347,8 @@ def classify(v, rid, name, root, cache, resolver=None):
         if key not in cache:
             cache[key] = make_ctx(fam, path)
         cat = check if fam == "manual" and isinstance(check, str) else next((m[rid] for m in MANUAL if rid in m), None)
+        if fam == "abap":
+            cache[key].aux = v.get("aux")          # per violation: the context itself is shared by file
         try:
             verdict, why, ev = run_check(fam, check, cache[key], int(line), cat)
         except Exception as e:  # a checker bug must never stop the batch
@@ -551,6 +553,23 @@ async def main():
 
         missing = []                      # rules that are not in this application's quality model
 
+        def make_aux(v, main_href):
+            """Lazy loader of the other source files of the violation's component (e.g. the include holding a
+            method body when the violation is reported on its declaration in a class include)."""
+            def load():
+                paths = []
+                href = dr._href(v, "component", "sourceCodes")
+                if not href:
+                    return paths
+                try:
+                    for f, _ln, fh in dr.dedupe(dr.extract_locations(client.get(href))):
+                        if fh and fh != main_href:
+                            paths.append(Path(client.download(fh, f)))
+                except dr.RestError:
+                    pass
+                return paths
+            return load
+
         async def fetch(rid, quota, name):
             out = []
             try:
@@ -562,7 +581,8 @@ async def main():
                     locs = client.locations(v) or [(None, None, None)]
                     for file_, line, href in locs:
                         out.append({"rule": rid, "file": file_ or "", "line": str(line) if line else "",
-                                    "fileHref": href, "objectFullName": dr.component_name(v)})
+                                    "fileHref": href, "objectFullName": dr.component_name(v),
+                                    "aux": make_aux(v, href)})
                         if quota is not None and len(out) >= quota:
                             return out
             except dr.UnknownRule:

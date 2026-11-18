@@ -918,12 +918,20 @@ def _method_impl_directive(ctx, s):
     if path is None or not names:
         return None
     prefix = path.stem[:30].casefold()
+    aux = getattr(ctx, "aux", None)
+    if aux:                                   # REST mode: the server gave the component's other source files
+        try:
+            siblings = list(aux())
+        except Exception:
+            siblings = []
+    else:
+        siblings = []
     try:
-        siblings = [p for p in path.parent.iterdir()
-                    if p.suffix.lower() == ".abap" and p.stem[:30].casefold() == prefix
-                    and p.stem[30:32].upper() == "CM"]
+        siblings += [p for p in path.parent.iterdir()
+                     if p.suffix.lower() == ".abap" and p.stem[:30].casefold() == prefix
+                     and p.stem[30:32].upper() == "CM"]
     except OSError:
-        return None
+        pass
     for name in names:
         rx = re.compile(r"^\s*METHOD\s+" + re.escape(name) + r"\s*\.", re.I)
         for p in sorted(siblings):
