@@ -215,7 +215,9 @@ CASES = [
     ("1020052", "css", "@import url('http://x.com/a.css');", 1, TP),
     ("1020030", "css", ".a { width: expression(document.body.clientWidth); }", 1, TP),
     # --- regression tests from real code -----------------------------------------------------------------
-    ("1020308", "js", "if ($(evt.relatedTarget).closest('.menuItem.open').length === 0) {}", 1, RV),   # wrapper of an expression
+    ("1020308", "js", "if ($(evt.relatedTarget).closest('.menuItem.open').length === 0) {}", 1, FP),   # wrapped once in the file
+    ("1020308", "js", "function f(e) {\n  $(this).addClass('a');\n  $(this).removeClass('b');\n}", 2, TP),   # same wrapper twice in a function
+    ("1020308", "js", "function f() {\n  $(this).addClass('a');\n}\nfunction g() {\n  $(this).hide();\n}", 2, RV),   # once per function, twice in the file
     ("1020312", "js", "$(document).on('click', '.sapUshellShellHeadItm', (event) => {\n  event.preventDefault();\n});", 1, TP),
     ("1020314", "js", "var $menuControl = $('.context-sub-level .megaMenu li'),\n    textAlign = $menuControl.css('text-align');", 2, TP),
     ("1020314", "js", "var $m = $('#only');\n$m.css('x', 1);", 2, FP),

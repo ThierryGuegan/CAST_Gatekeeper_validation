@@ -763,13 +763,75 @@ def chk_prefix_without_standard(ctx, n):                             # 1030110
     return TP, f"Vendor-prefixed property without the standard '{m.group(1)}' fallback", _ev(ctx, n)
 
 
+def _jq_wraps(line):
+    """(start column, whitespace-free expression) of each $(expr) / jQuery(expr) that wraps a non-literal expression."""
+    out = []
+    for m in re.finditer(r"(?<![\w$.])(?:\$|jQuery)\s*\(", line):
+        j, d = m.end(), 1
+        while j < len(line) and d:
+            d += (line[j] == "(") - (line[j] == ")")
+            j += 1
+        expr = re.sub(r"\s+", "", line[m.end():j - 1]) if d == 0 else ""
+        if expr and expr[0] not in "\"'`<":
+            out.append((m.start(), expr))
+    return out
+
+
+def _function_span(ctx, n, col, back=4000):
+    """(first line, last line) of the innermost function containing line n / col (the whole file when none)."""
+    first = max(0, n - 1 - back)
+    s = "\n".join(ctx.bare[first:n - 1] + [ctx.bare[n - 1][:col]])
+    i, depth, start = len(s) - 1, 0, None
+    while i >= 0:
+        c = s[i]
+        if c == "}":
+            depth += 1
+        elif c == "{":
+            if depth == 0:
+                if _classify(_header_before(s, i)[0]) in ("function", "iterfn"):
+                    start = i
+                    break
+            else:
+                depth -= 1
+        i -= 1
+    if start is None:
+        return 1, len(ctx.bare)
+    sline = first + s.count("\n", 0, start) + 1
+    scol = start - (s.rfind("\n", 0, start) + 1)
+    depth = 0
+    for ln in range(sline, len(ctx.bare) + 1):
+        text = ctx.bare[ln - 1][scol:] if ln == sline else ctx.bare[ln - 1]
+        for ch in text:
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    return sline, ln
+    return sline, len(ctx.bare)
+
+
 def chk_jquery_dup_selector(ctx, n):                                 # 1020308
     if not ctx.ok(n):
         return NOLINE
     m = re.search(r"(?:\$|jQuery)\s*\(\s*([\"'])([^\"']+)\1\s*\)", ctx.code[n - 1])
     if not m:
+        wraps = _jq_wraps(ctx.code[n - 1])
+        if wraps:
+            col, expr = wraps[0]
+            for col, expr in wraps:
+                a, z = _function_span(ctx, n, col)
+                in_fn = [i for i in range(a, z + 1) if any(e == expr for _, e in _jq_wraps(ctx.code[i - 1]))]
+                if len(in_fn) > 1:
+                    return TP, (f"$({expr}) wraps the same object {len(in_fn)} times in this function "
+                                f"(lines {', '.join(map(str, in_fn[:6]))}): cache it in a variable"), _ev(ctx, n)
+            in_file = [i for i in range(1, len(ctx.code) + 1) if any(e == expr for _, e in _jq_wraps(ctx.code[i - 1]))]
+            if len(in_file) == 1:
+                return FP, f"$({expr}) is evaluated only once in this file", _ev(ctx, n)
+            return RV, (f"$({expr}) appears {len(in_file)} times in the file but only once in this function: "
+                        "decide whether they share a scope"), _ev(ctx, n)
         if re.search(r"(?:\$|jQuery)\s*\(", ctx.bare[n - 1]):
-            return RV, "jQuery wraps an expression ($(this), $(event.target), ...): repeated wrapping of the same object cannot be decided from this line", _ev(ctx, n)
+            return RV, "jQuery wraps an expression that could not be parsed from this line", _ev(ctx, n)
         return RV, "No jQuery selector call at the reported line", _ev(ctx, n)
     sel = m.group(2)
     lines = [i + 1 for i, l in enumerate(ctx.code)

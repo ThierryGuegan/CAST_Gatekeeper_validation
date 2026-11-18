@@ -127,6 +127,18 @@ def main():
     check("same rule outside the AMDP method is still decided", amdp["4"]["verdict"] == "TRUE_POSITIVE", amdp["4"])
     check("SQL rule on .abap -> REVIEW with explanation", rows["1101072"]["verdict"] == "REVIEW" and "not parsed" in rows["1101072"]["reason"], rows["1101072"])
     check("not-found REVIEW is explained", rows["7528"]["verdict"] == "REVIEW" and "line-anchoring" in rows["7528"]["reason"], rows["7528"])
+    check("AMDP SELECT * decided from the keyword", rows["1101114"]["verdict"] == "TRUE_POSITIVE" and "SQLScript" in rows["1101114"]["reason"], rows["1101114"])
+
+    # --- 7884 on a class include: the pragma is in the method implementation (sibling CM include)
+    (src / "abap" / "ZCLX==========================CU.abap").write_text("CLASS zclx DEFINITION.\n  PUBLIC SECTION.\n    METHODS foo.\n    METHODS bar.\nENDCLASS.\n")
+    (src / "abap" / "ZCLX==========================CM001.abap").write_text("METHOD foo.\n  DATA x TYPE i ##NEEDED.\nENDMETHOD.\n")
+    (src / "abap" / "ZCLX==========================CM002.abap").write_text("METHOD bar.\n  WRITE 1.\nENDMETHOD.\n")
+    f9 = tmp / "i.csv"
+    f9.write_text("Rule ID,File,Line\n7884,abap/ZCLX==========================CU.abap,3\n7884,abap/ZCLX==========================CU.abap,4\n")
+    text, code = run(["--input", str(f9), "--source-root", str(src), "--out", str(out), "--rule-ids", "all"])
+    r9 = {r["line"]: r for r in csv.DictReader(open(out, encoding="utf-8-sig"))}
+    check("7884 declaration: pragma found in the method implementation", r9["3"]["verdict"] == "TRUE_POSITIVE" and "implementation of method foo" in r9["3"]["reason"], r9["3"])
+    check("7884 declaration without pragma stays REVIEW", r9["4"]["verdict"] == "REVIEW", r9["4"])
 
     # --- errors
     bad = tmp / "bad.csv"

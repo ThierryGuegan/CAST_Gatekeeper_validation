@@ -888,6 +888,61 @@ def _first_directive(ctx, lo, hi):
     return None
 
 
+METHOD_DECL = re.compile(r"^(?:CLASS-)?METHODS(?![\w-])\s*:?\s*", re.I)
+
+
+def _declared_methods(s):
+    """Method names declared by a METHODS / CLASS-METHODS statement (chained declarations included)."""
+    m = METHOD_DECL.match(s.up)
+    if not m:
+        return []
+    body, parts, depth, cur = s.text[m.end():], [], 0, ""
+    for ch in body:
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        if ch == "," and depth == 0:
+            parts.append(cur); cur = ""
+        else:
+            cur += ch
+    parts.append(cur)
+    return [p.split()[0] for p in parts if p.split()]
+
+
+def _method_impl_directive(ctx, s):
+    """Class include (CU/CO/CI): the pseudo-comment / pragma lives in the implementation of the method, which
+    the export puts in a sibling include (<class>...CM001.abap). Returns (method, file name, line, text) or None."""
+    path = getattr(ctx, "path", None)
+    names = _declared_methods(s)
+    if path is None or not names:
+        return None
+    prefix = path.stem[:30].casefold()
+    try:
+        siblings = [p for p in path.parent.iterdir()
+                    if p.suffix.lower() == ".abap" and p.stem[:30].casefold() == prefix
+                    and p.stem[30:32].upper() == "CM"]
+    except OSError:
+        return None
+    for name in names:
+        rx = re.compile(r"^\s*METHOD\s+" + re.escape(name) + r"\s*\.", re.I)
+        for p in sorted(siblings):
+            try:
+                lines = p.read_text(errors="replace").splitlines()
+            except OSError:
+                continue
+            for i, line in enumerate(lines):
+                if not rx.match(line):
+                    continue
+                for k in range(i, len(lines)):
+                    if k > i and re.match(r"^\s*ENDMETHOD\s*\.", lines[k], re.I):
+                        break
+                    for m in INSPECTION_OFF.finditer(lines[k]):
+                        if where_in_line(lines[k], m.start()) != "string":
+                            return name, p.name, k + 1, lines[k].strip()[:90]
+    return None
+
+
 def chk_inspection_off(ctx, n):                                     # 7884
     i = ctx.stmt_at(n)
     if i is None:
@@ -912,6 +967,10 @@ def chk_inspection_off(ctx, n):                                     # 7884
     if hit:
         return TP, (f"Code inspection is switched off at line {hit[0]} of this {what}: {hit[1]} "
                     f"(CAST reports the artifact, here at line {n})"), s.text
+    impl = _method_impl_directive(ctx, s)
+    if impl:
+        return TP, (f"Code inspection is switched off in the implementation of method {impl[0]} "
+                    f"({impl[1]} line {impl[2]}: {impl[3]}); CAST reports the declaration (here at line {n})"), s.text
     return RV, (f"No pseudo-comment (\"#EC ...) or pragma (##...) found in the statement at line {n} nor in the enclosing "
                 f"{what}: it may be in another include, or the source differs from the analyzed version"), s.text
 
