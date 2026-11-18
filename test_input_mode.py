@@ -140,6 +140,13 @@ def main():
     text, code = run(["--source-root", str(src)])
     check("MCP args still required without --input", code == 2)
 
+    # ids shared by ABAP and JS/TS (7788, 7884, 7526, 8028, 8032) are routed by file extension
+    for rid, f, fam in [("8028", "a.controller.js", "web"), ("8028", "z.abap", "abap"), ("7788", "a.ts", "web"),
+                        ("7788", "z.abap", "abap"), ("7884", "a.js", "web"), ("7884", "z.abap", "abap"),
+                        ("7526", "a.js", "web"), ("7526", "z.abap", "abap"), ("8032", "a.js", "web"),
+                        ("8032", "z.abap", "manual")]:
+        check(f"routing {rid} on {f}", g.pick_checker(rid, Path(f))[0] == fam, g.pick_checker(rid, Path(f))[0])
+
     print(f"{'all passed' if not FAILS else str(len(FAILS)) + ' failed: ' + ', '.join(FAILS)}")
     return 1 if FAILS else 0
 
