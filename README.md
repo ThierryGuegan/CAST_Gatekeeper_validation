@@ -52,6 +52,15 @@ is where the tool saves the most review time: `WHILE ... AND sy-subrc = 0` is a 
 that contain only compound assignments (`x += y`) are not empty even though CAST sees them that way (all 44 flagged
 `IF`/`SELECT` blocks of that kind). The justification in the report says which of these applies.
 
+A second calibration, on a full run (15,555 violations, 506 rules), corrected verdicts that had been too generous:
+a `SY-SUBRC` test only counts if it belongs to **that** statement (the look-ahead stops at the end of its block, at
+`ELSE`/`WHEN`, and at any statement that sets `SY-SUBRC` itself); testing the result variable instead of `SY-SUBRC` is
+`REVIEW` (CAST asks for the return code); `EXCEPTIONS OTHERS = 0` explicitly ignores errors; the
+`WITH AUTHORITY-CHECK` addition of one `CALL TRANSACTION` protects only that call; a success-only `IF sy-subrc = 0`
+with no `ELSE` is `REVIEW` for the "without error handling" rules; function-module files are followed from the
+extractor's parameter header to the `FUNCTION`. In JavaScript, regular-expression literals (for example
+`/[^0-9+-/*]/g`, which contains `/*`) are now recognised, so they no longer hide the rest of a file as a comment.
+
 ## Supported rules
 
 CAST publishes only rule **names and severities**, not descriptions. Each checker's semantics are inferred from the
@@ -226,7 +235,7 @@ and the `get_violations` shape are accepted, and `--dump` shows how your columns
 | `--url`, `--api-key`, `--app`, `--source-root` | Required for the MCP server mode (except with `--list-rules`). |
 | `--rest-url`, `--domain`, `--user`/`--password` or `--api-key`/`--api-user`, `--app` | CAST Dashboard REST API mode (see above); `--source-root` is optional there. |
 | `--input FILE` | Read the violations from a CSV/JSON export; only `--source-root` is then required. |
-| `--rule-ids` | `auto` (default: every rule with a checker), `abap`, `sapui5`, `web`, `sql`, `all` (auto + review-only), or a comma list such as `7520,1020600,1101114`. |
+| `--rule-ids` | `auto` (default: every rule with a checker), `abap`, `sapui5`, `web`, `sql`, `all` (auto + the review-only rules: expect thousands of extra `REVIEW` rows on a real application, one per violation), or a comma list such as `7520,1020600,1101114`. |
 | `--snapshot` | `latest` (default) or a snapshot number; in MCP mode also `5,6` (as accepted by `get_violations`). |
 | `--limit N` | Check only the first **N violations overall** (in REST mode: N source locations); rules are processed in order and the run stops at N. |
 | `--per-rule-limit N` | Check only the first **N violations per rule**. |

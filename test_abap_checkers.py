@@ -28,7 +28,7 @@ CASES = [
     ("7520", "READ TABLE lt INTO ls INDEX 1.\nWRITE ls.", 1, TP),
     ("7520", "READ TABLE lt INTO ls INDEX 1.\nIF sy-subrc = 0.\n  WRITE ls.\nENDIF.", 1, FP),
     ("7520", "SELECT SINGLE * FROM t INTO ls.\nREAD TABLE lt INTO l2 INDEX 1.\nIF sy-subrc = 0.\nENDIF.", 1, TP),
-    ("7520", "READ TABLE lt ASSIGNING <fs> INDEX 1.\nIF <fs> IS ASSIGNED.\nENDIF.", 1, FP),
+    ("7520", "READ TABLE lt ASSIGNING <fs> INDEX 1.\nIF <fs> IS ASSIGNED.\nENDIF.", 1, RV),
     ("8012", "OPEN DATASET p FOR INPUT IN TEXT MODE ENCODING DEFAULT.\nIF sy-subrc <> 0.\n  RETURN.\nENDIF.", 1, FP),
     ("8012", "OPEN DATASET p FOR INPUT IN TEXT MODE ENCODING DEFAULT.\nREAD DATASET p INTO s.", 1, TP),
     ("8014", "AUTHORITY-CHECK OBJECT 'S_X' ID 'ACTVT' FIELD '03'.\nIF sy-subrc <> 0.\nENDIF.", 1, FP),
@@ -146,12 +146,12 @@ CASES = [
     # 7520: SY-SUBRC read in a WHILE condition IS a check
     ("7520", "READ TABLE cvbpa WITH KEY cvbpa(19) BINARY SEARCH.\n* copy the partner\nWHILE cvbpa-posnr = cvbap-vgpos AND\n      SY-SUBRC = 0.\nENDWHILE.", 1, FP),
     # 7520: testing the result variable itself counts
-    ("7520", "SELECT SINGLE mwsk1 FROM t INTO lv_mwsk1 WHERE a = 1.\nCHECK lv_mwsk1 IS NOT INITIAL.", 1, FP),
+    ("7520", "SELECT SINGLE mwsk1 FROM t INTO lv_mwsk1 WHERE a = 1.\nCHECK lv_mwsk1 IS NOT INITIAL.", 1, RV),
     # 8120 / 8122: EXCEPTIONS only help if the return code is read afterwards
     ("8120", "CALL FUNCTION 'Z' EXPORTING a = 1 EXCEPTIONS OTHERS = 1.\nIF sy-subrc <> 0.\n  RETURN.\nENDIF.", 1, FP),
     ("8120", "CALL FUNCTION 'APPL_LOG_INIT'  ##FM_SUBRC_OK\n  EXPORTING object = o\n  EXCEPTIONS object_not_found = 1. \"#EC CI_SUBRC\n\nCALL FUNCTION 'MESSAGES_INITIALIZE'.", 1, TP),
     ("8120", "CALL FUNCTION 'MESSAGES_INITIALIZE'.", 1, TP),
-    ("8122", "CALL METHOD o->m EXCEPTIONS foo = 1.\nIF sy-subrc = 0.\nENDIF.", 1, FP),
+    ("8122", "CALL METHOD o->m EXCEPTIONS foo = 1.\nIF sy-subrc = 0.\nENDIF.", 1, RV),
     ("8122", "CALL METHOD o->m EXCEPTIONS foo = 1.\nWRITE 1.", 1, TP),
     # 7542: 'IF t[] IS INITIAL ... EXIT. ENDIF.' is a real guard
     ("7542", "IF t[] IS INITIAL.\n  PERFORM f_message.\n  EXIT.\nENDIF.\nSORT t BY a.\nSELECT * FROM x INTO TABLE r FOR ALL ENTRIES IN t WHERE a = t-a.", 6, FP),
@@ -191,6 +191,28 @@ CASES = [
     # --- compound assignments (x += y) are statements: the block is not empty
     ("8106", "IF t-beknz = 'S'.\n  w_debit += t-wog011.\nELSE.\n  w_credit += t-wog011.\nENDIF.", 1, FP),
     ("8126", "SELECT * FROM cosp INTO ls WHERE a = 1.\n  w_t += ls-wtg012.\n  w_u += ls-wtg013.\nENDSELECT.", 1, FP),
+    # --- regression tests from a full real run (15,555 violations): a check must belong to THE statement ----------
+    # 7520: the IF sy-subrc after ENDLOOP is not a check of the READ inside the loop
+    ("7520", "LOOP AT lt_mod INTO ls.\n  READ TABLE t_job INTO ls_job WITH KEY a = 1.\n  IF ls_job-status <> 'D'.\n    w_ko = 'X'.\n    EXIT.\n  ENDIF.\nENDLOOP.\nIF sy-subrc <> 0.\n  w_ko = 'X'.\nENDIF.", 2, TP),
+    # 7520: a later statement that sets SY-SUBRC itself takes over
+    ("7520", "READ TABLE lt INTO ls INDEX 1.\nASSIGN COMPONENT 'A' OF STRUCTURE ls TO <fs>.\nIF sy-subrc <> 0.\nENDIF.", 1, TP),
+    ("7520", "READ TABLE lt INTO ls INDEX 1.\nlv_x = 1.\nIF sy-subrc <> 0.\nENDIF.", 1, FP),
+    # 8120: EXCEPTIONS OTHERS = 0 ignores every error; the IF sy-subrc below belongs to the SELECT
+    ("8120", "IF a = 1.\n  CALL FUNCTION 'K_ACCOUNTS_READ_TEXTS'\n    EXPORTING i_ktopl = 'PC01'\n    EXCEPTIONS OTHERS = 0.\nENDIF.\nSORT lt BY a.\nSELECT a FROM bkpf INTO TABLE lt WHERE b = 1.\nIF sy-subrc EQ 0.\n  SORT lt BY a.\nENDIF.", 2, TP),
+    ("8120", "CALL FUNCTION 'Z' EXPORTING a = 1 EXCEPTIONS OTHERS = 1.\nSELECT a FROM t INTO TABLE lt WHERE b = 1.\nIF sy-subrc = 0.\nENDIF.", 1, TP),
+    ("8120", "CALL FUNCTION 'Z' EXPORTING a = 1 EXCEPTIONS OTHERS = 1.\nIF sy-subrc = 0.\n  x = 1.\nELSE.\n  RETURN.\nENDIF.", 1, FP),
+    ("8120", "CALL FUNCTION 'Z' EXPORTING a = 1 EXCEPTIONS OTHERS = 1.\nIF sy-subrc = 0.\n  x = 1.\nENDIF.", 1, RV),
+    ("8120", "CALL FUNCTION 'Z' EXPORTING a = 1 EXCEPTIONS OTHERS = 1.\nCASE sy-subrc.\n  WHEN 0.\n    x = 1.\n  WHEN OTHERS.\n    RETURN.\nENDCASE.", 1, FP),
+    # 8428: the WITH AUTHORITY-CHECK addition of ANOTHER CALL TRANSACTION protects only that call
+    ("8428", "CASE x.\n  WHEN 1.\n    CALL TRANSACTION 'YOHAN' WITH AUTHORITY-CHECK.\n  WHEN 2.\n    CALL TRANSACTION 'YVARIANCE'.\nENDCASE.", 5, TP),
+    ("8428", "CASE x.\n  WHEN 1.\n    CALL TRANSACTION 'YOHAN' WITH AUTHORITY-CHECK.\nENDCASE.", 3, FP),
+    ("8428", "AUTHORITY-CHECK OBJECT 'S_TCODE' ID 'TCD' FIELD 'X'.\nCASE x.\n  WHEN 1.\n    CALL TRANSACTION 'A'.\nENDCASE.", 4, FP),
+    # 7512: a FORM whose only statements are compound assignments (*=) is not empty
+    ("7512", "FORM f_neg CHANGING p TYPE t.\n  p-a *= -1.\n  p-b *= -1.\nENDFORM.", 1, FP),
+    # 7512: CAST reports line 1 of a function module file (the extractor's parameter header); the FUNCTION is below
+    ("7512", "BEGIN OF FUNCTION PARAMETERS ZF .\nIMPORTING VALUE(A) TYPE I .\nEND OF FUNCTION PARAMETERS .\nFUNCTION zf.\nENDFUNCTION.", 1, TP),
+    ("7512", "BEGIN OF FUNCTION PARAMETERS ZF .\nIMPORTING VALUE(A) TYPE I .\nEND OF FUNCTION PARAMETERS .\nFUNCTION zf.\n  a = 1.\nENDFUNCTION.", 1, FP),
+    ("7512", "FORM f.\nENDFORM.", 2, TP),                                                      # reported on ENDFORM
 ]
 
 
@@ -206,7 +228,10 @@ def main():
     for rid, src, line, frag in [
             ("8106", "IF a = 1.\n  w += 1.\nENDIF.", 1, "compound assignments"),
             ("8126", "SELECT * FROM t INTO ls.\n  w += ls-x.\nENDSELECT.", 1, "compound assignments"),
-            ("7518", "CASE a.\n  WHEN OTHERS.\nENDCASE.", 1, "present but empty")]:
+            ("7518", "CASE a.\n  WHEN OTHERS.\nENDCASE.", 1, "present but empty"),
+            ("7512", "FORM f CHANGING p TYPE t.\n  p-a *= -1.\nENDFORM.", 1, "compound assignments"),
+            ("8120", "CALL FUNCTION 'Z' EXCEPTIONS OTHERS = 0.", 1, "explicitly ignores"),
+            ("7520", "READ TABLE lt INTO ls INDEX 1.\nCHECK ls IS NOT INITIAL.", 1, "not SY-SUBRC")]:
         got, why, ev = ac.RULES[rid][1](ac.Ctx(src.splitlines()), line)
         if frag not in why:
             bad += 1

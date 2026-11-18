@@ -17,8 +17,16 @@ TP, FP, RV = "TRUE_POSITIVE", "FALSE_POSITIVE", "REVIEW"
 NOLINE = (RV, "Reported line is outside the file (source may differ from the analyzed version)", "")
 
 
-def _strip_js(text, line_comments=True):
+# After one of these a '/' starts a regular-expression literal, after anything else (identifier, number,
+# ')' or ']') it is a division. This is what keeps '/[^0-9+-/*]/g' from being read as the start of a comment.
+_REGEX_AFTER_CHAR = set("([{,;=:!&|?+-*%<>~^")
+_REGEX_AFTER_WORD = {"return", "typeof", "instanceof", "in", "of", "new", "delete", "void", "throw", "case",
+                     "do", "else", "yield", "await"}
+
+
+def _strip_js(text, line_comments=True, regex=True):
     c, b, state, i, n = [], [], None, 0, len(text)
+    prev, word, prev_word = "", "", ""          # last significant code character / identifier being read / last identifier
     while i < n:
         ch, nx = text[i], (text[i + 1] if i + 1 < n else "")
         if state is None:
@@ -26,9 +34,21 @@ def _strip_js(text, line_comments=True):
                 state = "line"; c.append("  "); b.append("  "); i += 2; continue
             if ch == "/" and nx == "*":
                 state = "block"; c.append("  "); b.append("  "); i += 2; continue
+            if regex and ch == "/" and (prev == "" or prev in _REGEX_AFTER_CHAR or prev == "}" or
+                                         (prev.isalnum() or prev in "_$") and prev_word in _REGEX_AFTER_WORD):
+                state = "regex"; in_class = False
+                c.append(ch); b.append(ch); i += 1; continue
             if ch in "'\"`":
                 state = ch
             c.append(ch); b.append(ch)
+            if ch.isalnum() or ch in "_$":
+                word += ch
+            else:
+                if word:
+                    prev_word = word
+                word = ""
+            if not ch.isspace():
+                prev = ch
         elif state == "line":
             if ch == "\n":
                 state = None; c.append(ch); b.append(ch)
@@ -38,11 +58,24 @@ def _strip_js(text, line_comments=True):
             if ch == "*" and nx == "/":
                 state = None; c.append("  "); b.append("  "); i += 2; continue
             c.append(ch if ch == "\n" else " "); b.append(ch if ch == "\n" else " ")
+        elif state == "regex":                   # inside /.../flags: a '/' inside [...] does not end it
+            if ch == "\\":
+                c.append(ch + nx); b.append("__" if nx != "\n" else "_\n"); i += 2; continue
+            if ch == "\n":                       # not a regex after all (e.g. a division): resume as code
+                state = None; c.append(ch); b.append(ch); prev = ""
+            elif ch == "[":
+                in_class = True; c.append(ch); b.append("_")
+            elif ch == "]":
+                in_class = False; c.append(ch); b.append("_")
+            elif ch == "/" and not in_class:
+                state = None; c.append(ch); b.append(ch); prev = ")"; word = ""
+            else:
+                c.append(ch); b.append("_")
         else:  # inside a string literal
             if ch == "\\":
                 c.append(ch + nx); b.append("_" + ("\n" if nx == "\n" else "_")); i += 2; continue
             if ch == state or (ch == "\n" and state != "`"):
-                c.append(ch); b.append(ch); state = None
+                c.append(ch); b.append(ch); state = None; prev = ")"; word = ""
             else:
                 c.append(ch); b.append("_" if ch != "\n" else ch)
         i += 1
@@ -61,7 +94,7 @@ class JsCtx:
         if kind == "js":
             self.code, self.bare = _strip_js(text)
         elif kind == "css":
-            self.code, self.bare = _strip_js(text, line_comments=False)
+            self.code, self.bare = _strip_js(text, line_comments=False, regex=False)
         elif kind in ("html", "xml"):
             self.code, self.bare = _strip_markup(text)
         else:                                    # json: no comments

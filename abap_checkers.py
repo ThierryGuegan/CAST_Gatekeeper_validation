@@ -391,15 +391,52 @@ def _targets(up):
     return {x.lstrip("@").split("-")[0] for x in found if x.upper() != "TABLE"}
 
 
+BLOCK_OPEN = re.compile(r"^(IF|LOOP|DO|WHILE|CASE|TRY|AT\s+(?:NEW|END OF|FIRST|LAST))(?![\w-])")
+BLOCK_CLOSE = re.compile(r"^END(?:IF|LOOP|DO|WHILE|CASE|TRY|AT|SELECT)(?![\w-])")
+BRANCH_END = re.compile(r"^(ELSE|ELSEIF|WHEN|CATCH|CLEANUP)(?![\w-])")
+# statements that set SY-SUBRC themselves: whatever follows them refers to THEIR return code
+SUBRC_SETTERS = re.compile(
+    r"^(CALL\s+(?:FUNCTION|METHOD|TRANSACTION)|ASSIGN|SEARCH|FIND|REPLACE|OPEN\s+DATASET|READ|CLOSE\s+DATASET|"
+    r"DELETE\s+DATASET|AUTHORITY-CHECK|SELECT(?![\w-])|INSERT|UPDATE|DELETE|MODIFY|LOOP|COMMIT|ROLLBACK)(?![\w-])")
+
+
+def following(ctx, first, limit=8):
+    """Yield (index, statement) of the statements that can check the return code of the statement before
+    `first`: they stop at the end of the block that contains it (ENDIF, ENDLOOP, ELSE, WHEN, end of procedure ...)
+    and at the first statement that sets SY-SUBRC itself. Statements inside a block opened after the target are
+    skipped (a check there is conditional) but a setter inside it still ends the search."""
+    depth = 0
+    for k in range(first, min(first + limit, len(ctx.stmts))):
+        s = ctx.stmts[k]
+        u = s.up
+        if PROC_END.match(u):
+            return
+        if depth == 0 and BRANCH_END.match(u):
+            return
+        if BLOCK_CLOSE.match(u):
+            if depth == 0:
+                return                      # the block that contains the target ends here
+            depth -= 1
+            continue
+        if depth == 0:
+            yield k, s
+        if SUBRC_SETTERS.match(u) and not (u.startswith("LOOP") and False):
+            return
+        if BLOCK_OPEN.match(u) or (SEL.match(u) and k in ctx.sel_end):
+            depth += 1
+
+
 def _checks_subrc(u, targets, strict):
-    """True if statement `u` READS the return code of the previous statement: it mentions SY-SUBRC
-    (not as an assignment target) or, unless strict, tests the READ/SELECT result variable itself."""
+    """'subrc' if statement `u` tests SY-SUBRC (not as an assignment target), 'copy' if it only stores it,
+    'result' (unless strict) if it tests the READ/SELECT result variable instead, else None."""
     if SUBRC_ONLY.search(u) and not SUBRC_ASSIGN.match(u):
-        return True
+        return "copy" if _is_copy(u) else "subrc"
     if strict:
-        return False
-    return any(re.search(r"(?<![\w-])" + re.escape(t) + r"(?![\w])[\w\[\]\-<>]*\s+IS\s+(?:NOT\s+)?(?:INITIAL|ASSIGNED|BOUND)\b", u)
-               for t in targets)
+        return None
+    for t in targets:
+        if re.search(r"(?<![\w-])" + re.escape(t) + r"(?![\w])[\w\[\]\-<>]*\s+IS\s+(?:NOT\s+)?(?:INITIAL|ASSIGNED|BOUND)\b", u):
+            return "result"
+    return None
 
 
 def _is_copy(up):
@@ -418,17 +455,18 @@ def make_subrc(start_rx, label, strict=False):
             return expected(ctx, i, label)
         end = ctx.sel_end.get(j, j)
         targets = _targets(ctx.stmts[j].up)
-        for k in range(end + 1, min(end + 7, len(ctx.stmts))):
-            s = ctx.stmts[k]
-            if PROC_END.match(s.up) or start.match(s.up):
-                break           # procedure ends / another statement overwrites SY-SUBRC
-            if _checks_subrc(s.up, targets, strict):
-                if _is_copy(s.up):
-                    return RV, (f"SY-SUBRC is only copied at line {s.first} ({s.text[:60]}): confirm that the stored "
-                                f"value is evaluated"), ctx.ev(j, k)
+        for k, s in following(ctx, end + 1):
+            kind = _checks_subrc(s.up, targets, strict)
+            if kind == "copy":
+                return RV, (f"SY-SUBRC is only copied at line {s.first} ({s.text[:60]}): confirm that the stored "
+                            f"value is evaluated"), ctx.ev(j, k)
+            if kind == "result":
+                return RV, (f"The result variable is tested at line {s.first} ({s.text[:60]}), not SY-SUBRC: CAST "
+                            f"asks for the return code; decide whether testing the result is acceptable"), ctx.ev(j, k)
+            if kind == "subrc":
                 return FP, f"Return code is checked at line {s.first}: {s.text[:80]}", ctx.ev(j, k)
         return TP, (f"No SY-SUBRC check after the {label} at line {ctx.stmts[j].first} "
-                    f"(next 6 statements inspected)"), ctx.ev(j, min(end + 2, len(ctx.stmts) - 1))
+                    f"(the statements up to the end of its block were inspected)"), ctx.ev(j, min(end + 2, len(ctx.stmts) - 1))
     return chk
 
 
@@ -685,9 +723,18 @@ def chk_open_sql_in_loop(ctx, n):                                   # 7868
 
 # ================================== blocks =====================================
 def chk_empty_proc(ctx, n):                                         # 7512
-    i, j = anchor(ctx, n, re.compile(r"^(FORM|FUNCTION|MODULE)(?![\w-])"))
+    opener = re.compile(r"^(FORM|FUNCTION|MODULE)(?![\w-])")
+    i, j = anchor(ctx, n, opener)
     if i is None:
         return NOSTMT
+    if j is None:
+        m = re.match(r"^END(FORM|FUNCTION|MODULE)(?![\w-])", ctx.stmts[i].up)
+        if m:                                                       # reported on the closing statement
+            j = next((k for k in range(i - 1, -1, -1) if re.match(r"^" + m.group(1) + r"(?![\w-])", ctx.stmts[k].up)), None)
+        elif ctx.stmts[i].up.startswith("BEGIN OF FUNCTION PARAMETERS") or i == 0:
+            # a function module file starts with the extractor's parameter header; CAST reports its first line
+            fs = [k for k, x in enumerate(ctx.stmts) if re.match(r"^FUNCTION(?![\w-])\s+\w", x.up)]
+            j = fs[0] if len(fs) == 1 else None
     if j is None:
         return expected(ctx, i, "FORM / FUNCTION / MODULE")
     kw = ctx.stmts[j].up.split()[0]
@@ -696,7 +743,8 @@ def chk_empty_proc(ctx, n):                                         # 7512
         return RV, f"END{kw} not found", ctx.ev(j)
     if end == j + 1:
         return TP, f"{kw} at line {ctx.stmts[j].first} contains no statement", ctx.ev(j, end)
-    return FP, f"{kw} contains {end - j - 1} statement(s), first at line {ctx.stmts[j + 1].first}", ctx.ev(j, end)
+    note = COMPOUND_NOTE if only_compound([ctx.stmts[m].up for m in range(j + 1, end)]) else ""
+    return FP, f"{kw} contains {end - j - 1} statement(s), first at line {ctx.stmts[j + 1].first}" + note, ctx.ev(j, end)
 
 
 def chk_empty_file(ctx, n):                                         # 7514, 7516
@@ -856,7 +904,7 @@ def chk_random_seed(ctx, n):                                        # 8430
 
 
 # ================================ authorization ================================
-AUTH = re.compile(r"^AUTHORITY-CHECK(?![\w-])|\bAUTHORITY_CHECK\w*|\bAUTH_CHECK\w*|\bFILE_VALIDATE_NAME\b|\bAUTHORITY-CHECK\b")
+AUTH = re.compile(r"^AUTHORITY-CHECK(?![\w-])|\bAUTHORITY_CHECK\w*|\bAUTH_CHECK\w*|\bFILE_VALIDATE_NAME\b")
 
 
 def make_auth(trigger_rx, label, own_auth=None, ambiguous=False):
@@ -1028,14 +1076,18 @@ def chk_call_error_handling(kind):
         if j is None:
             return RV, f"No CALL {kind} statement at the reported line (functional call syntax is not analysed)", ctx.ev(i)
         s = ctx.stmts[j]
-        for k in range(j + 1, min(j + 7, len(ctx.stmts))):
-            u = ctx.stmts[k]
-            if PROC_END.match(u.up) or start.match(u.up):
-                break           # procedure ends / another call overwrites SY-SUBRC
-            if _checks_subrc(u.up, set(), True):
-                if _is_copy(u.up):
-                    return RV, (f"SY-SUBRC is only copied at line {u.first} ({u.text[:60]}): confirm that the stored "
-                                f"value is evaluated"), ctx.ev(j, k)
+        if re.search(r"\bOTHERS\s*=\s*0\b", s.up):
+            return TP, "EXCEPTIONS OTHERS = 0 explicitly ignores every error: SY-SUBRC stays 0", s.text
+        for k, u in following(ctx, j + 1):
+            kind_ = _checks_subrc(u.up, set(), True)
+            if kind_ == "copy":
+                return RV, (f"SY-SUBRC is only copied at line {u.first} ({u.text[:60]}): confirm that the stored "
+                            f"value is evaluated"), ctx.ev(j, k)
+            if kind_ == "subrc":
+                if re.match(r"^IF(?![\w-])", u.up) and re.search(r"(?:SY|SYST)-SUBRC\s*(?:=|EQ)\s*0\b", u.up) \
+                        and _if_layout(ctx, k)[0] is None:
+                    return RV, (f"Only the success path is tested at line {u.first} ({u.text[:50]}) and there is no "
+                                f"ELSE: a failure is silently ignored; decide whether that is acceptable"), ctx.ev(j, k)
                 return FP, f"SY-SUBRC is checked at line {u.first}: {u.text[:70]}", ctx.ev(j, k)
         if ctx.in_try(j):
             return FP, "The call is inside the protected part of a TRY block (class-based exceptions)", s.text
