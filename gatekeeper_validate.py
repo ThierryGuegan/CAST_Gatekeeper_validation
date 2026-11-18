@@ -300,28 +300,41 @@ def classify(v, rid, name, root, cache, resolver=None):
 
 async def triage(rules, fetch, exclude, args, root, resolver=None):
     """Shared loop: `fetch(rid, quota)` yields the violations of a rule (None = skip it),
-    `exclude(v, row)` (MCP mode only) creates the exclusion and returns the text for the `excluded` column."""
-    rows, remaining, cache = [], args.limit, {}
-    for rid in rules:
-        if remaining is not None and remaining <= 0:
-            break
-        name = rule_name(rid)
-        if name is None:
-            print(f"[{rid}] unknown rule id, skipped (see --list-rules)")
-            continue
-        quota = min((x for x in (remaining, args.per_rule_limit) if x is not None), default=None)
-        viols = await fetch(rid, quota, name)
-        if viols is None:
-            continue
-        if quota is not None:
-            viols = viols[:quota]
-        for v in viols:
-            row = classify(v, rid, name, root, cache, resolver)
-            if exclude and row["verdict"] == FP:
-                row["excluded"] = await exclude(v, row)
-            rows.append(row)
-        if remaining is not None:
-            remaining -= len(viols)
+    `exclude(v, row)` (MCP mode only) creates the exclusion and returns the text for the `excluded` column.
+    A failure or Ctrl+C never loses the work done: the rows checked so far are returned (and written)."""
+    rows, remaining, cache, total = [], args.limit, {}, len(rules)
+    try:
+        for n, rid in enumerate(rules, 1):
+            if remaining is not None and remaining <= 0:
+                break
+            name = rule_name(rid)
+            if name is None:
+                print(f"[{rid}] unknown rule id, skipped (see --list-rules)")
+                continue
+            quota = min((x for x in (remaining, args.per_rule_limit) if x is not None), default=None)
+            viols = await fetch(rid, quota, name)
+            if viols is None:
+                continue
+            if quota is not None:
+                viols = viols[:quota]
+            if viols:
+                print(f"[{n}/{total}] {rid} {name[:50]}: {len(viols)} violation(s)", flush=True)
+            elif n % 25 == 0:
+                print(f"[{n}/{total}] rules scanned, {len(rows)} violation(s) checked so far", flush=True)
+            for v in viols:
+                row = classify(v, rid, name, root, cache, resolver)
+                if exclude and row["verdict"] == FP:
+                    row["excluded"] = await exclude(v, row)
+                rows.append(row)
+            if remaining is not None:
+                remaining -= len(viols)
+    except KeyboardInterrupt:
+        print("\nInterrupted: writing the report of what was checked so far.", flush=True)
+    except Exception as e:  # noqa: BLE001 - keep the work done so far
+        if os.environ.get("GATEKEEPER_DEBUG"):
+            raise
+        print(f"\nStopped by an error ({type(e).__name__}: {e}): writing the report of what was checked so far "
+              f"({len(rows)} violation(s)).", flush=True)
     return rows
 
 
@@ -523,6 +536,6 @@ if __name__ == "__main__":
         if os.environ.get("GATEKEEPER_DEBUG"):
             raise
         msg = "; ".join(sorted({f"{type(c).__name__}: {c}" for c in _root_causes(exc)}))
-        sys.exit(f"Error while talking to the MCP server: {msg}\n"
-                 "Check --url (http://<host>:8090/mcp/gatekeeper), --api-key and the network path. "
-                 "Set GATEKEEPER_DEBUG=1 for the full traceback.")
+        sys.exit(f"Error while talking to the server: {msg}\n"
+                 "Check --url (http://<host>:8090/mcp/gatekeeper) or --rest-url, the credentials and the network "
+                 "path. Set GATEKEEPER_DEBUG=1 for the full traceback.")
