@@ -52,6 +52,12 @@ CASES = [
     ("1020176", "js", "try {\n  f();\n} catch (e) {\n  log(e);\n}", 3, FP),
     ("1020178", "js", "try {\n  f();\n} finally {\n}", 3, TP),
     ("1020178", "js", "try {\n  f();\n} finally {\n  g();\n}", 3, FP),
+    # break on the same line as the loop / switch that contains it; brace-less loops are not FP
+    ("1020182", "js", "for (var i = 0; i < 3; i++) { if (i) break; }", 1, TP),
+    ("1020182", "js", "function f(a) { switch (a) { case 1: x(); break; } }", 1, FP),
+    ("1020182", "js", "function f(a) {\n  for (var i = 0; i < 3; i++)\n    if (a[i]) break;\n}", 3, RV),
+    ("8028", "js", "function f(a) { switch (a) { case 1: return 1; default: return 2; } switch (b) { case 1: return 3; } }", 1, TP),
+    ("8028", "js", "function f(a) { switch (a) { default: return 2; } switch (b) { default: return 3; } }", 1, FP),
     # ids shared with ABAP (JS/TS files)
     ("8028", "js", "switch (a) {\n  case 1: break;\n}", 1, TP),
     ("8028", "js", "switch (a) {\n  case 1: break;\n  default: break;\n}", 1, FP),
