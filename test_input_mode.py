@@ -140,6 +140,15 @@ def main():
     check("7884 declaration: pragma found in the method implementation", r9["3"]["verdict"] == "TRUE_POSITIVE" and "implementation of method foo" in r9["3"]["reason"], r9["3"])
     check("7884 declaration without pragma stays REVIEW", r9["4"]["verdict"] == "REVIEW", r9["4"])
 
+    # reported line holds no statement: the FORM named in the object is used instead
+    (src / "abap" / "zform.abap").write_text("* header\n" * 40 + "FORM kobed_962.\nENDFORM.\nFORM full.\n  WRITE 1.\nENDFORM.\n")
+    fa = tmp / "j.csv"
+    fa.write_text("Rule ID,File,Line,Object\n7512,abap/zform.abap,6,X/ABAP/FORM/kobed_962\n7512,abap/zform.abap,6,X/ABAP/FORM/full\n")
+    text, code = run(["--input", str(fa), "--source-root", str(src), "--out", str(out), "--rule-ids", "all"])
+    ra = list(csv.DictReader(open(out, encoding="utf-8-sig")))
+    check("7512 empty FORM found by name", ra[0]["verdict"] == "TRUE_POSITIVE" and "line 41" in ra[0]["reason"], ra[0])
+    check("7512 non-empty FORM found by name", ra[1]["verdict"] == "FALSE_POSITIVE", ra[1])
+
     # REST mode: the method body comes from the server (ctx.aux), not from sibling files on disk
     import abap_checkers as _ac
     _d = tmp / "rest"; _d.mkdir()

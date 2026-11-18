@@ -331,6 +331,23 @@ def load_violations(path):
     return viols, {"headers": headers, "rows": len(records), "skipped": bad}
 
 
+ARTIFACT_OBJ = re.compile(r"/(FORM|MODULE|METHOD|FUNCTION)/([^/]+?)(?:/SQLSCRIPT)?$", re.I)
+
+
+def locate_artifact(ctx, obj):
+    """Line of the FORM / MODULE / METHOD / FUNCTION named by the object full name, or None.
+    CAST sometimes reports a meaningless line (the same one in unrelated files) but the object name is reliable."""
+    m = ARTIFACT_OBJ.search(str(obj or ""))
+    if not m:
+        return None
+    kind, name = m.group(1).upper(), m.group(2)
+    if kind == "MODULE":
+        name = re.sub(r"_(INPUT|OUTPUT)$", "", name, flags=re.I)
+    rx = re.compile(r"^" + kind + r"\s+" + re.escape(name) + r"(?![\w-])", re.I)
+    hits = [st.first for st in ctx.stmts if rx.match(st.up)]
+    return hits[0] if len(hits) == 1 else None
+
+
 def classify(v, rid, name, root, cache, resolver=None):
     """Run the rule's checker on one violation and return the report row.
     `resolver(v)` (REST mode) returns the server copy of the file; --source-root is the fallback."""
@@ -351,6 +368,12 @@ def classify(v, rid, name, root, cache, resolver=None):
             cache[key].aux = v.get("aux")          # per violation: the context itself is shared by file
         try:
             verdict, why, ev = run_check(fam, check, cache[key], int(line), cat)
+            if fam == "abap" and verdict == RV and why.startswith("No statement at the reported line"):
+                alt = locate_artifact(cache[key], pick(v, "object"))
+                if alt and alt != int(line):
+                    verdict, why2, ev = run_check(fam, check, cache[key], alt, cat)
+                    why = (f"CAST reported line {line}, which holds no statement; the artifact named in the object "
+                           f"is at line {alt}. {why2}")
         except Exception as e:  # a checker bug must never stop the batch
             verdict, why, ev = RV, f"Checker error: {e!r}", ""
     if verdict == RV and re.match(r"No |Not an? |Expected ", why):
