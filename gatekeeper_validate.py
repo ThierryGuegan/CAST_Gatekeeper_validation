@@ -163,9 +163,18 @@ def print_coverage(rows, out):
 SQL_ON_ABAP ="SQL rule on an ABAP file (embedded Open SQL / AMDP SQLScript): not parsed by the SQL checker"
 
 
+ABAP_OR_WEB = {"7788", "8028", "8032", "7884", "7526"}
+
+
 def pick_checker(rid, path):
     """Return (family, check). Shared ids go to SQL only for SQL/COBOL files; SQL-only rules that fire on
     ABAP files (AMDP SQLScript, Open SQL) are review-only because the SQL parser does not understand ABAP."""
+    if rid in ABAP_OR_WEB:            # same id on ABAP and on JavaScript/TypeScript files: the extension decides
+        if path is not None and path.suffix.lower() == ".abap":
+            if rid in ac.RULES:
+                return "abap", ac.RULES[rid][1]
+            return "manual", "Rule fired on an ABAP file but its checker only handles JavaScript/TypeScript"
+        return "web", wc.RULES[rid][1]
     is_sql_file = path is not None and path.suffix.lower() in sq.SQL_EXT
     if is_sql_file and rid in sq.RULES:
         return "sql", sq.RULES[rid][1]

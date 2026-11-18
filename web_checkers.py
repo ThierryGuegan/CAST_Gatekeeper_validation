@@ -439,6 +439,36 @@ def chk_hard_network(ctx, n):                                        # 1020070, 
     return RV, "No hard-coded URL / IP / UNC path at the reported line", _ev(ctx, n)
 
 
+INSPECTION_JS = re.compile(r"eslint-disable|eslint-env|jshint\s|jslint\s|/\*\s*global\b.*istanbul|istanbul\s+ignore|@ts-ignore|@ts-nocheck|"
+                           r"@ts-expect-error|tslint:disable|noinspection|NOSONAR|#region\s+eslint", re.I)
+
+
+def chk_js_inspection_off(ctx, n):                                   # 7884 on JS/TS files
+    if not ctx.ok(n):
+        return NOLINE
+    for k in range(max(1, n - 1), min(len(ctx.raw), n + 1) + 1):
+        m = INSPECTION_JS.search(ctx.raw[k - 1])
+        if m:
+            return TP, f"Code inspection is switched off at line {k}: {ctx.raw[k - 1].strip()[:90]}", _ev(ctx, k)
+    return RV, "No linter / inspection directive (eslint-disable, jshint, @ts-ignore, noinspection, ...) near the reported line", _ev(ctx, n)
+
+
+STRONG_PATH = re.compile(r"^(?:[A-Za-z]:[\\/]|\\\\[\w$.-]+\\|/(?:usr|tmp|home|var|opt|data|mnt|etc|srv|export)(?:/|$))")
+
+
+def chk_js_hardcoded_path(ctx, n):                                   # 7526 on JS/TS files
+    if not ctx.ok(n):
+        return NOLINE
+    lits = [a or b or c for a, b, c in re.findall(r"\"([^\"]*)\"|'([^']*)'|`([^`]*)`", ctx.code[n - 1])]
+    for x in lits:
+        if STRONG_PATH.match(x.strip()):
+            return TP, f"Hard-coded file path {x!r}", _ev(ctx, n)
+    for x in lits:
+        if re.match(r"^(?:\.{1,2}/|/)[\w.-]+(?:/[\w.-]+)+", x.strip()):
+            return RV, f"The literal {x!r} looks like a path (or a URL / module path): decide whether it is a file path", _ev(ctx, n)
+    return RV, "No file-path literal at the reported line", _ev(ctx, n)
+
+
 # ------------------------------------ file-level (Node/Angular/Vue) ------------------------------
 def file_level(ok_rx, what, trigger=None):
     ok, trig = re.compile(ok_rx, re.I), (re.compile(trigger) if trigger else None)
@@ -742,6 +772,12 @@ reg(1020170, "Avoid using XDomainRequest", K(r"\bXDomainRequest\b", "XDomainRequ
 reg(1020172, "Avoid using innerText", K(r"\.\s*innerText\b", "innerText"))
 reg(1020174, "Avoid using VBScript blocks", lit(r"(?i)<script[^>]*(?:language\s*=\s*[\"']?vbscript|type\s*=\s*[\"']text/vbscript)", "VBScript block"))
 reg(1020176, "Avoid empty catch blocks (JS)", chk_empty_catch)
+# ids shared with ABAP (routed by file extension in gatekeeper_validate.pick_checker)
+reg(7788, "Avoid empty catch blocks", chk_empty_catch)
+reg(8028, "Avoid missing default in switch statements", chk_switch_default)
+reg(8032, "Avoid using break statement in FOR loops", chk_break_in_for)
+reg(7884, "Avoid disabling source code inspection", chk_js_inspection_off)
+reg(7526, "Avoid using hard-coded paths", chk_js_hardcoded_path)
 reg(1020178, "Avoid empty finally blocks", chk_empty_finally)
 reg(1020180, "Avoid missing default in switch statements", chk_switch_default)
 reg(1020182, "Avoid using break statement in FOR loops", chk_break_in_for)
