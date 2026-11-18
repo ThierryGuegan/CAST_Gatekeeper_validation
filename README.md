@@ -71,7 +71,7 @@ before trusting its verdicts.
 |---|---|---|---|---|
 | `abap` | `abap_checkers.py` | ABAP (TG001, `com.castsoftware.sap`) | 76 | 95 |
 | `sapui5` | `sapui5_checkers.py` | SAPUI5 extension (`10206xx`): JS, `manifest.json`, `index.html` | 10 | – |
-| `web` | `web_checkers.py` | TG004: HTML5/JavaScript, TypeScript, Node.js, jQuery, AngularJS/Angular, React, Vue, CSS | 214 | 74 |
+| `web` | `web_checkers.py` | TG004: HTML5/JavaScript, TypeScript, Node.js, jQuery, AngularJS/Angular, React, Vue, CSS | 215 | 74 |
 | `sql` | `sql_checkers.py` | SQL Analyzer: PL/SQL, T-SQL, COBOL embedded SQL (`11010xx`) | 38 | 21 |
 
 Sources of the rule lists: [TG001](https://technologies.castsoftware.com/AIP/technologies/TG001),

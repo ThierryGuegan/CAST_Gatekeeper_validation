@@ -283,6 +283,36 @@ def chk_break_in_for(ctx, n):                                        # 1020182, 
                 + (" > ".join(trail) or "none") + ")"), _ev(ctx, n)
 
 
+CHAIN_SEG = r"[\w$]+(?:\([^()]*\))?(?:\[[^\]]*\])?"
+CHAIN = re.compile(CHAIN_SEG + r"(?:\s*\.\s*" + CHAIN_SEG + r")+")
+DOT_LIMIT = 3          # a.b.c.d: three property accesses in one expression (CAST's threshold is not published)
+
+
+def chk_dot_in_loop(ctx, n):                                         # 1020016
+    if not ctx.ok(n):
+        return NOLINE
+    line = ctx.bare[n - 1]
+    best = None
+    for m in CHAIN.finditer(line):
+        dots = len(re.findall(r"\.", re.sub(r"\([^()]*\)|\[[^\]]*\]", "", m.group(0))))
+        if best is None or dots > best[0]:
+            best = (dots, m)
+    if best is None or best[0] < DOT_LIMIT:
+        return RV, (f"No property chain with {DOT_LIMIT}+ dots on the reported line "
+                    f"(longest: {best[0] if best else 0}); CAST's threshold is not published: confirm manually"), _ev(ctx, n)
+    dots, m = best
+    own, kinds = enclosing_blocks(ctx, n, m.start())
+    for k in kinds:
+        if k in ("for", "while", "do", "iterfn"):
+            return TP, f"Property chain with {dots} dots ({m.group(0).strip()[:60]}) evaluated inside a {k} loop", _ev(ctx, n)
+        if k == "function":
+            break
+    if re.match(r"(?:for|while|do)\b", own):
+        return TP, f"Property chain with {dots} dots evaluated in a loop statement", _ev(ctx, n)
+    return RV, (f"Property chain with {dots} dots ({m.group(0).strip()[:60]}) but no loop block around it in this "
+                f"function (CAST may count an outer loop or a callback): confirm manually"), _ev(ctx, n)
+
+
 def chk_function_in_loop(ctx, n):                                    # 1020038
     if not ctx.ok(n):
         return NOLINE
@@ -883,6 +913,7 @@ reg(7526, "Avoid using hard-coded paths", chk_js_hardcoded_path)
 reg(1020178, "Avoid empty finally blocks", chk_empty_finally)
 reg(1020180, "Avoid missing default in switch statements", chk_switch_default)
 reg(1020182, "Avoid using break statement in FOR loops", chk_break_in_for)
+reg(1020016, "Avoid using too much dot notation in loop", chk_dot_in_loop)
 reg(1020038, "Avoid defining and calling functions inside loops", chk_function_in_loop)
 reg(1020006, "Avoid calling a function in a termination loop", chk_call_in_loop_condition)
 reg(1020068, "Avoid return statement in finally block", make_jump_in_finally(("return",)))

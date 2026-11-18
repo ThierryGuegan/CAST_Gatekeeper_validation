@@ -63,6 +63,12 @@ CASES = [
     ("1020182", "js", "function f(a) {\n  if (a) {\n    break;\n  }\n}", 3, RV),
     ("8028", "js", "function f(a) {\n  switch (a) {\n" + "    case 1: x();\n" * 120 + "    default: y();\n  }\n}", 2, FP),
     ("8028", "js", "function f(a) {\n  switch (a) {\n" + "    case 1: x();\n" * 120 + "  }\n}", 2, TP),
+    # 1020016: long property chain in a loop
+    ("1020016", "js", "for (var i = 0; i < n; i++) {\n  x = a.b.c.d.e;\n}", 2, TP),
+    ("1020016", "js", "items.forEach(function (it) {\n  x = this.getView().getModel().oData.value;\n});", 2, TP),
+    ("1020016", "js", "x = a.b.c.d.e;", 1, RV),
+    ("1020016", "js", "for (var i = 0; i < n; i++) {\n  x = a.b;\n}", 2, RV),
+    ("1020016", "js", "while (ok) {\n  var v = 1.5 + 2.5;\n}", 2, RV),
     # ids shared with ABAP (JS/TS files)
     ("8028", "js", "switch (a) {\n  case 1: break;\n}", 1, TP),
     ("8028", "js", "switch (a) {\n  case 1: break;\n  default: break;\n}", 1, FP),
