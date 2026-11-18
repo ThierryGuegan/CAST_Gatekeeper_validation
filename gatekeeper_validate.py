@@ -31,6 +31,8 @@ Report:          --no-true-positives writes only FALSE_POSITIVE and REVIEW rows 
 Safety:          dry-run by default; --apply-exclusions needs the EXCLUSION_MANAGER role
 First run:       --dump prints the raw get_violations payload so FIELD_MAP can be checked
 Information:     --list-rules prints every supported rule (no server needed)
+                 --coverage   (with --rest-url or --input) counts the violations per rule and lists the rules this
+                              tool has no checker for; writes <out>_coverage.csv
 
 Rule ids that exist in two languages (e.g. 1101018 GROUP BY in ABAP and in SQL) are routed by
 file extension: .sql/.pkb/.cbl/... -> SQL checker, anything else -> ABAP checker.
@@ -126,7 +128,39 @@ def rule_name(rid):
     return "(manual-review rule)" if any(rid in m for m in MANUAL) else None
 
 
-SQL_ON_ABAP = "SQL rule on an ABAP file (embedded Open SQL / AMDP SQLScript): not parsed by the SQL checker"
+def coverage_rows(counts):
+    """counts: {rule id: {"name", "count"}} -> rows (rule, name, violations, status, detail), most violations first.
+    status: CHECKED (a checker decides), REVIEW_ONLY (always a manual review), NO_CHECKER (not covered)."""
+    rows = []
+    for rid, e in counts.items():
+        fam, chk = pick_checker(rid, None)
+        if fam is None:
+            status, detail = "NO_CHECKER", ""
+        elif fam == "manual":
+            status, detail = "REVIEW_ONLY", chk if isinstance(chk, str) else ""
+        else:
+            status, detail = "CHECKED", fam
+        rows.append((rid, e.get("name") or rule_name(rid) or "", e["count"], status, detail))
+    return sorted(rows, key=lambda r: (-r[2], int(r[0])))
+
+
+def print_coverage(rows, out):
+    total = sum(r[2] for r in rows)
+    print(f"\n{len(rows)} rule(s) with violations, {total} violation(s) in the snapshot:")
+    for st, label in (("CHECKED", "decided by a checker"), ("REVIEW_ONLY", "always a manual review"),
+                      ("NO_CHECKER", "NOT covered by this tool")):
+        sel = [r for r in rows if r[3] == st]
+        print(f"  {st:<12} {len(sel):>4} rule(s) {sum(r[2] for r in sel):>7} violation(s)  - {label}")
+    for r in (r for r in rows if r[3] == "NO_CHECKER"):
+        print(f"    no checker: {r[0]:>8}  {r[2]:>6}  {r[1]}")
+    with open(out, "w", newline="", encoding="utf-8-sig") as f:
+        w = csv.writer(f)
+        w.writerow(["rule", "name", "violations", "status", "detail"])
+        w.writerows(rows)
+    print(f"-> {out}")
+
+
+SQL_ON_ABAP ="SQL rule on an ABAP file (embedded Open SQL / AMDP SQLScript): not parsed by the SQL checker"
 
 
 def pick_checker(rid, path):
@@ -382,7 +416,13 @@ async def main():
                          "the console summary still counts them")
     ap.add_argument("--apply-exclusions", action="store_true")
     ap.add_argument("--list-rules", action="store_true")
+    ap.add_argument("--coverage", action="store_true",
+                    help="count the violations of the snapshot per rule and show which rules have a checker, are "
+                         "review-only, or are not covered (needs --rest-url or --input; no source is read)")
     args = ap.parse_args()
+    cov_out = str(Path(args.out).with_name(Path(args.out).stem + "_coverage.csv"))
+    if args.coverage and not (args.input or args.rest_url):
+        ap.error("--coverage needs --rest-url or --input (the MCP mode has no call that lists every rule)")
 
     if args.list_rules:
         for fam, rules in FAMILIES.items():
@@ -398,7 +438,7 @@ async def main():
     if args.input or args.rest_url:
         if args.apply_exclusions:
             ap.error("--apply-exclusions needs the MCP server; use the justification column of the report instead")
-        if not args.source_root and not args.rest_url:
+        if not args.source_root and not args.rest_url and not args.coverage:
             ap.error("--source-root is required")
         if args.rest_url:
             for req in ("domain", "app"):
@@ -419,6 +459,9 @@ async def main():
         by_rule = {}
         for v in viols:
             by_rule.setdefault(v["rule"], []).append(v)
+        if args.coverage:
+            print_coverage(coverage_rows({r: {"name": "", "count": len(vs)} for r, vs in by_rule.items()}), cov_out)
+            return
         wanted = resolve_rules(args.rule_ids)
         if args.dump:
             print(f"columns: {info['headers']}\nrows: {info['rows']}, usable: {len(viols)}, unusable: {info['skipped']}")
@@ -447,6 +490,14 @@ async def main():
         except dr.RestError as e:
             sys.exit(f"Dashboard REST API: {e}")
         print(f"Application '{app.get('name')}', snapshot {snap.get('number')} ({snap.get('href')})")
+        if args.coverage:
+            try:
+                counts = client.rule_counts(snap, progress=lambda n: print(f"  {n} violation(s) read...")
+                                            if n % 10000 < 1000 else None)
+            except dr.RestError as e:
+                sys.exit(f"Dashboard REST API: {e}")
+            print_coverage(coverage_rows(counts), cov_out)
+            return
 
         missing = []                      # rules that are not in this application's quality model
 

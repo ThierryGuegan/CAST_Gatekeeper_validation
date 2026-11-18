@@ -13,10 +13,10 @@ dr.BACKOFF = 0.01              # do not wait between retries in the tests
 D = "AAD"
 
 
-def violation(n, comp, with_findings=True):
+def violation(n, comp, with_findings=True, rule="7544"):
     v = {"component": {"href": f"{D}/components/{n}/snapshots/6", "name": comp,
                        "sourceCodes": {"href": f"{D}/components/{n}/snapshots/6/source-codes", "name": "Source Codes"}},
-         "rulePattern": {"href": f"{D}/rule-patterns/7544"}}
+         "rulePattern": {"href": f"{D}/rule-patterns/{rule}", "name": f"rule {rule}"}}
     if with_findings:
         v["diagnosis"] = {"findings": {"href": f"{D}/components/{n}/snapshots/6/findings/7544"}}
     return v
@@ -24,7 +24,8 @@ def violation(n, comp, with_findings=True):
 
 # rule 7544: 3 violations (paging test uses nbRows=2); rule 1020060: 1 violation without findings; rule 7520: none
 VIOLATIONS = {"7544": [violation(1, "ZPROG"), violation(2, "ZPROG2"), violation(3, "ZPROG3")],
-              "1020060": [violation(4, "main.js", with_findings=False)], "7520": []}
+              "1020060": [violation(4, "main.js", with_findings=False, rule="1020060")],
+              "7520": [], "9999999": [violation(5, "x.cbl", rule="9999999")], "7054": [violation(6, "y", rule="7054")]}
 ABAP_SRC = "SELECT SINGLE * FROM mara INTO ls WHERE matnr = p.\nSELECT * FROM mara INTO ls.\n  WRITE ls.\nENDSELECT.\n"
 JS_SRC = 'var a = 1;\nconsole.log(1);\n'
 FILES = {"D:\\deploy\\APP\\abap\\zprog.abap": (f"{D}/local-sites/9/file-contents/100", ABAP_SRC),
@@ -90,7 +91,7 @@ class Handler(BaseHTTPRequestHandler):
         if p == f"/rest/{D}/applications/3/snapshots/6/violations":
             if q.get("rule-pattern") == "7520":                  # like the real server for a rule that is not in the model
                 return self.reply(400, {"code": 2, "message": "Incorrect parameter: rule-pattern is unknown in this domain: 7520"})
-            allv = VIOLATIONS.get(q.get("rule-pattern"), [])
+            allv = VIOLATIONS.get(q.get("rule-pattern"), []) if "rule-pattern" in q else [v for vs in VIOLATIONS.values() for v in vs]
             s, n = int(q.get("startRow", 1)), int(q.get("nbRows", 10))
             return self.reply(200, allv[s - 1:s - 1 + n])
         for name, (href, text) in FILES.items():
@@ -289,6 +290,26 @@ def main():
     check("--apply-exclusions refused in REST mode", code == 2)
     text, code = run(common + ["--input", "x.csv"])
     check("--input and --rest-url exclusive", code == 2)
+
+    # --- --coverage: violations per rule, with the rules that have no checker
+    counts = c.rule_counts(snap, page=2)
+    check("rule_counts pages through every violation", {k: v["count"] for k, v in counts.items()} ==
+          {"7544": 3, "1020060": 1, "9999999": 1, "7054": 1}, counts)
+    check("rule_counts keeps the rule name", counts["7544"]["name"] == "rule 7544", counts)
+    cov = tmp / "cov.csv"
+    text, code = run(["--rest-url", base, "--domain", D, "--user", "bob", "--password", "pw", "--app", "MyApp",
+                      "--coverage", "--out", str(cov)])
+    crows = list(csv.DictReader(open(tmp / "cov_coverage.csv", encoding="utf-8-sig")))
+    check("coverage statuses", {r["rule"]: r["status"] for r in crows} ==
+          {"7544": "CHECKED", "1020060": "CHECKED", "7054": "REVIEW_ONLY", "9999999": "NO_CHECKER"}, crows)
+    check("coverage lists the uncovered rule", code == 0 and "no checker:  9999999" in text and "NOT covered" in text, text)
+    check("coverage sorted by violations", [r["rule"] for r in crows][0] == "7544", crows)
+    text, code = run(["--url", "http://x", "--api-key", "k", "--app", "A", "--source-root", ".", "--coverage"])
+    check("--coverage refused in MCP mode", code == 2)
+    inp = tmp / "in.csv"
+    inp.write_text("Rule ID,File,Line\n7544,a.abap,1\n7544,b.abap,2\n123456,c.abap,3\n")
+    text, code = run(["--input", str(inp), "--coverage", "--out", str(tmp / "i.csv")])
+    check("coverage from an export, no --source-root needed", code == 0 and "123456" in text and "NO_CHECKER" in text, text)
 
     srv.shutdown()
     print("all passed" if not FAILS else f"{len(FAILS)} failed: {', '.join(FAILS)}")

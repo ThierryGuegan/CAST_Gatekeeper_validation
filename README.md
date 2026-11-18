@@ -244,6 +244,7 @@ and the `get_violations` shape are accepted, and `--dump` shows how your columns
 | `--no-true-positives` | Leave the `TRUE_POSITIVE` rows out of the CSV, so it only holds the `FALSE_POSITIVE` and `REVIEW` rows that need a human decision. The console summary still counts everything (`N TRUE_POSITIVE row(s) not written`). `--limit` and `--per-rule-limit` still count the true positives that were checked. |
 | `--dump` | Print the raw payload and stop: `get_violations` (MCP), or a violation with its findings and source codes (REST), or how an export file's columns were read (`--input`). |
 | `--list-rules` | List the supported rules and exit. |
+| `--coverage` | With `--rest-url` or `--input`: count the violations of the snapshot per rule and say whether each rule is `CHECKED` (a checker decides), `REVIEW_ONLY` (always a manual review) or `NO_CHECKER` (not covered by this tool). Prints a summary and the uncovered rules, and writes `<out>_coverage.csv`. It reads every violation once (no source files), so it can take a while on a large application. Not available in MCP mode. |
 
 The MCP API requires `nb_rows` ≥ 10, so with `--limit` below 10 the tool fetches 10 and checks only the first N.
 

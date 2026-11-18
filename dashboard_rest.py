@@ -209,6 +209,28 @@ class DashboardClient:
                 return
             start += len(batch)
 
+    def rule_counts(self, snapshot, page=1000, progress=None):
+        """Count the violations of the snapshot per rule, without a rule filter: {rule id: {"name", "count"}}.
+        Reads every violation once (paged), so it can take a while on a large application."""
+        counts, start, seen = {}, 1, 0
+        prev = None
+        while True:
+            batch = _as_list(self.get(f"{snapshot['href']}/violations", {"startRow": start, "nbRows": page}))
+            if not batch:
+                return counts
+            if batch == prev:
+                raise RestError("The server returns the same page again whatever startRow is: cannot list all violations")
+            prev = batch
+            for v in batch:
+                rid = rule_id(v)
+                if rid:
+                    e = counts.setdefault(rid, {"name": rule_name_of(v), "count": 0})
+                    e["count"] += 1
+            seen += len(batch)
+            start += len(batch)
+            if progress:
+                progress(seen)
+
     def raw_for_violation(self, v):
         """The three documents a violation location can come from (for --dump)."""
         out = {"violation": v}
@@ -300,6 +322,18 @@ def dedupe(items):
             seen.add(it[:2])
             out.append(it)
     return out
+
+
+def rule_id(v):
+    """The numeric rule id of a violation: last number of rulePattern.href (e.g. 'AED/rule-patterns/7544')."""
+    rp = v.get("rulePattern") if isinstance(v, dict) else None
+    m = re.search(r"(\d+)/?$", rp.get("href") or "") if isinstance(rp, dict) else None
+    return m.group(1) if m else None
+
+
+def rule_name_of(v):
+    rp = v.get("rulePattern") if isinstance(v, dict) else None
+    return str(rp.get("name") or "") if isinstance(rp, dict) else ""
 
 
 def component_name(v):
