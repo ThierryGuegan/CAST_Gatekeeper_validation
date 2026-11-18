@@ -192,6 +192,15 @@ CASES = [
     ("1020340", "js", "$.ajax(url).done(ok).fail(bad);", 1, FP),
     ("1020340", "js", "$.ajax(url)\n  .done(ok)\n  .fail(bad);", 1, FP),
     ("1020340", "js", "jQuery.ajax(url, {\n  dataType: 'json',\n  error: bad\n});", 1, FP),
+    # --- a regular-expression literal containing /* must not hide the rest of the file (real file, 294 lines lost)
+    ("1020010", "js", "var s = n.replace(/[^0-9+-/*]/g, '');\naList.forEach(function (x) { f(x); });", 2, TP),
+    ("1020010", "js", "var d = total / count; // average\naList.forEach(function (x) { f(x); });", 2, TP),
+    ("1020010", "js", "if (/\\/\\*/.test(s)) { g(); }\naList.forEach(function (x) { f(x); });", 2, TP),
+    ("1020010", "js", "var r = /'quote/.test(t);\naList.forEach(function (x) { f(x); });", 2, TP),
+    ("1020010", "js", "// aList.forEach(function (x) {});\nvar a = 1;", 1, FP),
+    # --- 1020006: a minified line holds many loops; every one is checked
+    ("1020006", "js", "for(var i=0;i<a.length;i++){x(i)}for(var j=0;j<f(j);j++){y(j)}", 1, TP),
+    ("1020006", "js", "for(var i=0;i<a.length;i++){x(i)}for(var j=0;j<b.length;j++){y(j)}", 1, FP),
 ]
 
 

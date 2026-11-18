@@ -197,21 +197,24 @@ def chk_call_in_loop_condition(ctx, n):                              # 1020006
     if not ctx.ok(n):
         return NOLINE
     text = " ".join(ctx.bare[n - 1:n + 2])
-    m = re.search(r"\bfor\s*\(", text)
-    if not m:
-        return RV, "No for loop at the reported line", _ev(ctx, n)
-    depth, k = 0, m.end() - 1
-    for j in range(k, len(text)):
-        depth += (text[j] == "(") - (text[j] == ")")
-        if depth == 0:
-            header = text[k + 1:j]
-            break
-    else:
-        return RV, "for header not closed on the following lines", _ev(ctx, n)
-    parts = header.split(";")
-    if len(parts) >= 3 and re.search(r"[\w$\]]\s*\(", parts[1]):
-        return TP, "The loop condition calls a function: it is re-evaluated on every iteration", _ev(ctx, n)
-    return FP, "The loop condition contains no function call", _ev(ctx, n)
+    loops = []                                       # (has_call, condition) of EVERY for(;;) loop of the window
+    for m in re.finditer(r"\bfor\s*\(", text):
+        depth, k = 0, m.end() - 1
+        for j in range(k, len(text)):
+            depth += (text[j] == "(") - (text[j] == ")")
+            if depth == 0:
+                parts = text[k + 1:j].split(";")
+                if len(parts) >= 3:
+                    loops.append((bool(re.search(r"[\w$\]]\s*\(", parts[1])), parts[1].strip()))
+                break
+    if not loops:
+        return RV, "No for(;;) loop at the reported line", _ev(ctx, n)
+    calling = [cond for has, cond in loops if has]
+    if calling:
+        more = f" ({len(calling)} of {len(loops)} loops on these lines)" if len(loops) > 1 else ""
+        return TP, f"The loop condition calls a function: it is re-evaluated on every iteration{more}", _ev(ctx, n)
+    return FP, ("The loop condition contains no function call" +
+                (f" (all {len(loops)} loops on these lines were checked)" if len(loops) > 1 else "")), _ev(ctx, n)
 
 
 def make_ws_loop(pattern, label):
