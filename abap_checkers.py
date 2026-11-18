@@ -765,6 +765,15 @@ def only_compound(stmts):
     return bool(body) and all(COMPOUND_ASSIGN.match(u) for u in body)
 
 
+ASSERT_NOTE = ("; they are all ASSERT statements, which CAST does not appear to count as statements "
+               "(seen on a flagged block of a real application)")
+
+
+def only_assert(stmts):
+    body = [u for u in stmts if not re.match(r"^(ELSE|ELSEIF|ENDIF)(?![\w-])", u)]
+    return bool(body) and all(re.match(r"^ASSERT(?![\w-])", u) for u in body)
+
+
 def chk_empty_if(ctx, n):                                           # 8106
     i, j = anchor(ctx, n, re.compile(r"^IF(?![\w-])"))
     if i is None:
@@ -792,7 +801,8 @@ def chk_empty_if(ctx, n):                                           # 8106
         return TP, "Every branch of the IF is empty", ctx.ev(j, end)
     if empty[0] or any(empty):
         return RV, "Only some branches of the IF are empty", ctx.ev(j, end)
-    note = COMPOUND_NOTE if only_compound([ctx.stmts[m].up for m in range(j + 1, end)]) else ""
+    body = [ctx.stmts[m].up for m in range(j + 1, end)]
+    note = COMPOUND_NOTE if only_compound(body) else ASSERT_NOTE if only_assert(body) else ""
     return FP, "The IF block contains statements" + note, ctx.ev(j, end)
 
 

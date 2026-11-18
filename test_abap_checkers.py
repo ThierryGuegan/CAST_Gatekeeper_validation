@@ -227,6 +227,7 @@ def main():
             print(f"FAIL {rid} line {line}: expected {want}, got {got} - {why}\n     src: {src!r}")
     for rid, src, line, frag in [
             ("8106", "IF a = 1.\n  w += 1.\nENDIF.", 1, "compound assignments"),
+            ("8106", "IF a IS INITIAL.\n  ASSERT 1 = 0.\nENDIF.", 1, "ASSERT statements"),
             ("8126", "SELECT * FROM t INTO ls.\n  w += ls-x.\nENDSELECT.", 1, "compound assignments"),
             ("7518", "CASE a.\n  WHEN OTHERS.\nENDCASE.", 1, "present but empty"),
             ("7512", "FORM f CHANGING p TYPE t.\n  p-a *= -1.\nENDFORM.", 1, "compound assignments"),
@@ -236,9 +237,10 @@ def main():
         if frag not in why:
             bad += 1
             print(f"FAIL reason of {rid}: expected '{frag}' in: {why}")
-    for rid, src, line in [("8106", "IF a = 1.\n  w = 1.\nENDIF.", 1)]:
+    for rid, src, line in [("8106", "IF a = 1.\n  w = 1.\nENDIF.", 1),
+                           ("8106", "IF a = 1.\n  ASSERT x = 1.\n  w = 1.\nENDIF.", 1)]:
         got, why, ev = ac.RULES[rid][1](ac.Ctx(src.splitlines()), line)
-        if "compound" in why:
+        if "compound" in why or "ASSERT" in why:
             bad += 1
             print(f"FAIL reason of {rid}: a plain assignment must not be described as compound: {why}")
     print(f"{len(CASES) - bad}/{len(CASES)} passed")
