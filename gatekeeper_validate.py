@@ -166,6 +166,13 @@ SQL_ON_ABAP ="SQL rule on an ABAP file (embedded Open SQL / AMDP SQLScript): not
 
 ABAP_OR_WEB = {"7788", "8028", "8032", "7884", "7526"}
 
+# SQLScript (AMDP) is not parsed, but for rules defined by a keyword the keyword on the reported line decides.
+# Only a hit is conclusive (TRUE_POSITIVE); anything else stays a manual review.
+AMDP_KEYWORD = {
+    "1101034": (re.compile(r"\bSELECT\s+DISTINCT\b", re.I), "SELECT DISTINCT in the SQLScript statement"),
+    "1101114": (re.compile(r"\bSELECT\s+(?:DISTINCT\s+)?(?:[\w$#]+\s*\.\s*)?\*", re.I), "SELECT * in the SQLScript statement"),
+}
+
 
 def pick_checker(rid, path):
     """Return (family, check). Shared ids go to SQL only for SQL/COBOL files; SQL-only rules that fire on
@@ -181,6 +188,8 @@ def pick_checker(rid, path):
         return "sql", sq.RULES[rid][1]
     if path is not None and path.suffix.lower() == ".abap" and rid in sq.RULES \
             and not any(rid in FAMILIES[f] for f in ("sapui5", "web", "abap")):
+        if rid in AMDP_KEYWORD:
+            return "amdp", AMDP_KEYWORD[rid]
         return "manual", SQL_ON_ABAP
     for fam in ("sapui5", "web", "abap", "sql"):
         if rid in FAMILIES[fam]:
@@ -194,7 +203,9 @@ def pick_checker(rid, path):
 def make_ctx(fam, path):
     lines = path.read_text(errors="replace").splitlines()
     if fam == "abap":
-        return ac.Ctx(lines)
+        c = ac.Ctx(lines)
+        c.path = path
+        return c
     if fam in ("sapui5", "web"):
         return ui.JsCtx(lines, ui.kind_of(path))
     if fam == "sql":
@@ -230,6 +241,12 @@ def run_check(fam, check, ctx, line, category=None):
     if fam == "manual":
         ev = " ".join(ctx[line - 1].split())[:300] if 1 <= line <= len(ctx) else ""
         return RV, f"{category}: cannot be decided from the source text alone, review manually", ev
+    if fam == "amdp":
+        rx, label = check
+        ev = " ".join(ctx[line - 1].split())[:300] if 1 <= line <= len(ctx) else ""
+        if ev and rx.search(ev):
+            return TP, f"{label} at line {line} (AMDP SQLScript, decided from the keyword on the reported line)", ev
+        return RV, SQL_ON_ABAP + ": no keyword match on the reported line, review manually", ev
     verdict, why, ev = check(ctx, line)
     if fam == "abap" and verdict != RV and ctx.in_amdp(line):
         return RV, (f"Inside an AMDP method (SQLScript): ABAP statement parsing does not apply, so the checker's "
