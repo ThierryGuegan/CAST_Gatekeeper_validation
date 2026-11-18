@@ -55,9 +55,14 @@ CASES = [
     # break on the same line as the loop / switch that contains it; brace-less loops are not FP
     ("1020182", "js", "for (var i = 0; i < 3; i++) { if (i) break; }", 1, TP),
     ("1020182", "js", "function f(a) { switch (a) { case 1: x(); break; } }", 1, FP),
-    ("1020182", "js", "function f(a) {\n  for (var i = 0; i < 3; i++)\n    if (a[i]) break;\n}", 3, RV),
     ("8028", "js", "function f(a) { switch (a) { case 1: return 1; default: return 2; } switch (b) { case 1: return 3; } }", 1, TP),
     ("8028", "js", "function f(a) { switch (a) { default: return 2; } switch (b) { default: return 3; } }", 1, FP),
+    # break: found by scanning backwards, even when the structure before is broken or the loop has no braces
+    ("1020182", "js", "function f(a) {\n  for (var i = 0; i < 3; i++)\n    if (a[i]) break;\n}", 3, TP),
+    ("1020182", "js", "var re = /{{/;\nfunction f(a) {\n  for (var i = 0; i < 3; i++) {\n    if (a[i]) {\n      break;\n    }\n  }\n}", 5, TP),
+    ("1020182", "js", "function f(a) {\n  if (a) {\n    break;\n  }\n}", 3, RV),
+    ("8028", "js", "function f(a) {\n  switch (a) {\n" + "    case 1: x();\n" * 120 + "    default: y();\n  }\n}", 2, FP),
+    ("8028", "js", "function f(a) {\n  switch (a) {\n" + "    case 1: x();\n" * 120 + "  }\n}", 2, TP),
     # ids shared with ABAP (JS/TS files)
     ("8028", "js", "switch (a) {\n  case 1: break;\n}", 1, TP),
     ("8028", "js", "switch (a) {\n  case 1: break;\n  default: break;\n}", 1, FP),
