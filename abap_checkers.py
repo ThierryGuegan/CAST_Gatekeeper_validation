@@ -318,8 +318,9 @@ def chk_empty_select(ctx, n):                                       # 8126
         return FP, "No ENDSELECT closes this SELECT (not a loop), so there is no loop to be empty", ctx.ev(j)
     if end == j + 1:
         return TP, f"The loop from line {ctx.stmts[j].first} to ENDSELECT contains no statement", ctx.ev(j, end)
+    note = COMPOUND_NOTE if only_compound([ctx.stmts[m].up for m in range(j + 1, end)]) else ""
     return FP, (f"The loop body is not empty: {end - j - 1} statement(s), first at line {ctx.stmts[j + 1].first} "
-                f"({ctx.stmts[j + 1].text[:60]})"), ctx.ev(j, end)
+                f"({ctx.stmts[j + 1].text[:60]})" + note), ctx.ev(j, end)
 
 
 def chk_leave_in_select(ctx, n):                                    # 8132
@@ -706,6 +707,16 @@ def chk_empty_file(ctx, n):                                         # 7514, 7516
     return FP, f"The file contains {len(body)} statement(s), first at line {body[0].first}", body[0].text
 
 
+COMPOUND_ASSIGN = re.compile(r"^\S+\s*(?:\+|-|\*|/|&&|\*\*)=")
+COMPOUND_NOTE = ("; they are all compound assignments (x += y), which CAST does not appear to count as statements "
+                 "(seen on every flagged block of a real application)")
+
+
+def only_compound(stmts):
+    body = [u for u in stmts if not re.match(r"^(ELSE|ELSEIF|ENDIF|ENDSELECT)(?![\w-])", u)]
+    return bool(body) and all(COMPOUND_ASSIGN.match(u) for u in body)
+
+
 def chk_empty_if(ctx, n):                                           # 8106
     i, j = anchor(ctx, n, re.compile(r"^IF(?![\w-])"))
     if i is None:
@@ -733,7 +744,8 @@ def chk_empty_if(ctx, n):                                           # 8106
         return TP, "Every branch of the IF is empty", ctx.ev(j, end)
     if empty[0] or any(empty):
         return RV, "Only some branches of the IF are empty", ctx.ev(j, end)
-    return FP, "The IF block contains statements", ctx.ev(j, end)
+    note = COMPOUND_NOTE if only_compound([ctx.stmts[m].up for m in range(j + 1, end)]) else ""
+    return FP, "The IF block contains statements" + note, ctx.ev(j, end)
 
 
 def chk_case_others(ctx, n):                                        # 7518
@@ -759,7 +771,10 @@ def chk_case_others(ctx, n):                                        # 7518
         elif re.match(r"^ENDCASE(?![\w-])", u):
             depth -= 1
         elif depth == 0 and re.match(r"^WHEN OTHERS(?![\w-])", u):
-            return FP, f"WHEN OTHERS present at line {ctx.stmts[k].first}", ctx.ev(j, end)
+            if k + 1 == end:
+                return TP, (f"WHEN OTHERS at line {ctx.stmts[k].first} is present but empty: unexpected values are "
+                            f"silently ignored, exactly as if it were missing (CAST reports it)"), ctx.ev(j, end)
+            return FP, f"WHEN OTHERS present at line {ctx.stmts[k].first} and it handles the other values", ctx.ev(j, end)
     return TP, "CASE without WHEN OTHERS", ctx.ev(j, end)
 
 

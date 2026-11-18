@@ -448,6 +448,8 @@ async def main():
             sys.exit(f"Dashboard REST API: {e}")
         print(f"Application '{app.get('name')}', snapshot {snap.get('number')} ({snap.get('href')})")
 
+        missing = []                      # rules that are not in this application's quality model
+
         async def fetch(rid, quota, name):
             out = []
             try:
@@ -462,6 +464,9 @@ async def main():
                                     "fileHref": href, "objectFullName": dr.component_name(v)})
                         if quota is not None and len(out) >= quota:
                             return out
+            except dr.UnknownRule:
+                missing.append(rid)
+                return None
             except dr.RestError as e:
                 print(f"[{rid}] REST error, skipped: {e}")
                 return None
@@ -480,6 +485,9 @@ async def main():
                 return None
 
         rows = await triage(resolve_rules(args.rule_ids), fetch, None, args, root, resolver)
+        if missing:
+            print(f"{len(missing)} rule(s) are not in this application's quality model, nothing to check: "
+                  f"{', '.join(missing)}")
         if not args.dump:
             write_report(rows, args.out, args.no_true_positives)
         return

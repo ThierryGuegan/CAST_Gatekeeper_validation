@@ -88,6 +88,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(200, [{"href": f"{D}/applications/3/snapshots/5", "number": 1, "annotation": {"date": {"time": 1000}}},
                                     {"href": f"{D}/applications/3/snapshots/6", "number": 2, "annotation": {"date": {"time": 2000}}}])
         if p == f"/rest/{D}/applications/3/snapshots/6/violations":
+            if q.get("rule-pattern") == "7520":                  # like the real server for a rule that is not in the model
+                return self.reply(400, {"code": 2, "message": "Incorrect parameter: rule-pattern is unknown in this domain: 7520"})
             allv = VIOLATIONS.get(q.get("rule-pattern"), [])
             s, n = int(q.get("startRow", 1)), int(q.get("nbRows", 10))
             return self.reply(200, allv[s - 1:s - 1 + n])
@@ -209,6 +211,17 @@ def main():
     rows = list(csv.DictReader(open(out, encoding="utf-8-sig")))
     check("no download and no --source-root -> REVIEW", [r["verdict"] for r in rows] == ["REVIEW"] and "not available" in rows[0]["reason"], (rows, text))
     FILES.update(saved)
+
+    # --- a rule that is not part of the application's quality model is not an error
+    try:
+        list(c.iter_violations(snap, "7520")); check("unknown rule raises UnknownRule", False, "no error")
+    except dr.UnknownRule:
+        pass
+    text, code = run(common + ["--rule-ids", "7520,7544"])
+    rows = list(csv.DictReader(open(out, encoding="utf-8-sig")))
+    check("unknown rule: no error line, one summary line, the other rules still run",
+          code == 0 and "REST error" not in text and "1 rule(s) are not in this application's quality model" in text
+          and "7520" in text and len(rows) == 3, (code, len(rows), text))
 
     # --- flaky network: transient resets are retried, permanent ones are skipped without losing the run
     vs = list(c.iter_violations(snap, "7544"))

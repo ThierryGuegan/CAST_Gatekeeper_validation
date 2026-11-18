@@ -70,7 +70,7 @@ CASES = [
     ("8106", "IF a = 1.\n  WRITE 1.\nENDIF.", 1, FP),
     ("8106", "IF a = 1.\nELSE.\n  WRITE 1.\nENDIF.", 1, RV),
     ("7518", "CASE a.\n  WHEN 1.\n    WRITE 1.\nENDCASE.", 1, TP),
-    ("7518", "CASE a.\n  WHEN 1.\n    WRITE 1.\n  WHEN OTHERS.\nENDCASE.", 1, FP),
+    ("7518", "CASE a.\n  WHEN 1.\n    WRITE 1.\n  WHEN OTHERS.\n    WRITE 2.\nENDCASE.", 1, FP),
     ("7518", "CASE a.\n  WHEN 1.\n    CASE b.\n      WHEN OTHERS.\n    ENDCASE.\nENDCASE.", 1, TP),
     ("7518", "v = COND #( WHEN a = 1 THEN 2 ).", 1, TP),
     ("7518", "v = COND #( WHEN a = 1 THEN 2 ELSE 3 ).", 1, FP),
@@ -185,6 +185,12 @@ CASES = [
     ("1101018", "itab = select a, count(*) AS c\n  FROM t\n  GROUP BY a;\nENDMETHOD.", 1, RV),
     # long comment banner above a FORM (reported line is in the banner)
     ("7858", "*&" + "-" * 20 + "\n" + "*&  comment\n" * 12 + "FORM x USING VALUE(p) TYPE i.\nENDFORM.", 2, TP),
+    # --- an EMPTY "WHEN OTHERS." is how CAST sees a missing one (32 of 32 flagged cases on a real application)
+    ("7518", "CASE a.\n  WHEN 1.\n    WRITE 1.\n  WHEN OTHERS.\nENDCASE.", 1, TP),
+    ("7518", "CASE <lfs>.\n\n* comment\n  WHEN lc_z.\n    PERFORM f.\n\n  WHEN OTHERS.\n\nENDCASE.", 1, TP),
+    # --- compound assignments (x += y) are statements: the block is not empty
+    ("8106", "IF t-beknz = 'S'.\n  w_debit += t-wog011.\nELSE.\n  w_credit += t-wog011.\nENDIF.", 1, FP),
+    ("8126", "SELECT * FROM cosp INTO ls WHERE a = 1.\n  w_t += ls-wtg012.\n  w_u += ls-wtg013.\nENDSELECT.", 1, FP),
 ]
 
 
@@ -197,6 +203,19 @@ def main():
         if got != want:
             bad += 1
             print(f"FAIL {rid} line {line}: expected {want}, got {got} - {why}\n     src: {src!r}")
+    for rid, src, line, frag in [
+            ("8106", "IF a = 1.\n  w += 1.\nENDIF.", 1, "compound assignments"),
+            ("8126", "SELECT * FROM t INTO ls.\n  w += ls-x.\nENDSELECT.", 1, "compound assignments"),
+            ("7518", "CASE a.\n  WHEN OTHERS.\nENDCASE.", 1, "present but empty")]:
+        got, why, ev = ac.RULES[rid][1](ac.Ctx(src.splitlines()), line)
+        if frag not in why:
+            bad += 1
+            print(f"FAIL reason of {rid}: expected '{frag}' in: {why}")
+    for rid, src, line in [("8106", "IF a = 1.\n  w = 1.\nENDIF.", 1)]:
+        got, why, ev = ac.RULES[rid][1](ac.Ctx(src.splitlines()), line)
+        if "compound" in why:
+            bad += 1
+            print(f"FAIL reason of {rid}: a plain assignment must not be described as compound: {why}")
     print(f"{len(CASES) - bad}/{len(CASES)} passed")
     return 1 if bad else 0
 

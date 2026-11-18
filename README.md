@@ -44,11 +44,13 @@ another file (a loop in a caller, a security header configured elsewhere, a chec
 `REVIEW`, or `TRUE_POSITIVE` with the limitation stated in the reason.
 
 **Calibrated on real data.** The checkers were run against the violations of a real application through the REST
-API and corrected where they disagreed with the code (for example: `CALL FUNCTION ... EXCEPTIONS` without a
+API and corrected where they disagreed with the code. For example: `CALL FUNCTION ... EXCEPTIONS` without a
 `SY-SUBRC` test is still a violation; `sy-subrc = 0.` assigns the return code and does not check it; an
-`IF t[] IS INITIAL ... EXIT.` guard is accepted only when the branch really leaves). Some verdicts show that
-CAST itself over-reports (for example `WHILE ... AND sy-subrc = 0` is a real return-code check), which is where
-the tool saves the most review time.
+`IF t[] IS INITIAL ... EXIT.` guard is accepted only when the branch really leaves; an **empty** `WHEN OTHERS.` is
+reported like a missing one (all 32 flagged cases were empty). Some verdicts show that CAST itself over-reports, which
+is where the tool saves the most review time: `WHILE ... AND sy-subrc = 0` is a real return-code check, and blocks
+that contain only compound assignments (`x += y`) are not empty even though CAST sees them that way (all 44 flagged
+`IF`/`SELECT` blocks of that kind). The justification in the report says which of these applies.
 
 ## Supported rules
 
@@ -281,6 +283,7 @@ groups, add `--no-true-positives`.
 | No violations for a rule in REST mode | Use the **engineering** domain (e.g. `AED` / `CENTRAL`), not a measurement-only one (e.g. `AAD`). Run with `--rule-ids <id> --dump` to see what the server returns. |
 | Many `REVIEW` rows saying "CAST reported this line" | The construct is not at the reported line: a line-anchoring difference or a checker limit. Look at the `evidence` column; if a pattern repeats, it is a candidate for a checker fix. |
 | `REVIEW` "Inside an AMDP method" / "SQL rule on an ABAP file" | SQLScript or embedded SQL inside ABAP is not parsed: review those by hand. |
+| `HTTP 400 ... rule-pattern is unknown in this domain` | The rule is not part of this application's quality model (for example a rule from a newer extension that was not installed or activated). It is not an error: the rule is skipped, and one line at the end lists the skipped rules. |
 | `ConnectionResetError: [WinError 10054]` / "connection reset by peer" / "connection was interrupted 4 times" | The server, a proxy or a firewall closed the connection, often because a long run sends thousands of requests. Each request is retried 4 times with a growing pause. A request that still fails is skipped (the row becomes `REVIEW`, or the rule is skipped with a message) and the run continues. If the whole run stops, the report of what was checked so far is still written. Rerun later, or reduce the load with `--per-rule-limit`, `--limit` or a single family (`--rule-ids abap`). |
 | `Checker error: ...` in `reason` | A checker bug on an unusual construct: the run continues, the row is `REVIEW`. Please report the rule id and file. |
 | Full traceback needed | Set `GATEKEEPER_DEBUG=1`. |
