@@ -30,7 +30,8 @@ Limits:          --limit N (overall), --per-rule-limit N (per rule); both count 
 Report:          --no-true-positives writes only FALSE_POSITIVE and REVIEW rows to the CSV
 Safety:          dry-run by default; --apply-exclusions needs the EXCLUSION_MANAGER role
 First run:       --dump prints the raw get_violations payload so FIELD_MAP can be checked
-Information:     --list-rules prints every supported rule (no server needed)
+Information:     --list-rules prints every supported rule (no server needed); --version prints the git commit.
+                 Every run starts with a 'gatekeeper_validate <commit>' line
                  --coverage   (with --rest-url or --input) counts the violations per rule and lists the rules this
                               tool has no checker for; writes <out>_coverage.csv
 
@@ -39,7 +40,7 @@ file extension: .sql/.pkb/.cbl/... -> SQL checker, anything else -> ABAP checker
 
 Setup: pip install mcp        (see README.md)
 """
-import argparse, asyncio, contextlib, csv, io, json, os, re, sys
+import argparse, asyncio, contextlib, csv, io, json, os, re, subprocess, sys
 from collections import Counter
 from pathlib import Path
 
@@ -398,6 +399,23 @@ def write_report(rows, out, hide_true_positives=False):
             print(f"FP  {x['rule']}  {x['file']}:{x['line']}  {x['reason']}")
 
 
+def version():
+    """'gatekeeper_validate <commit> (<date>)' from the git clone this file lives in, '+modified' when a .py file has
+    local changes; 'unknown' outside a git clone. Printed at the start of every run so a pasted output shows which
+    code produced it."""
+    here = str(Path(__file__).resolve().parent)
+
+    def git(*a):
+        return subprocess.run(["git", "-C", here, *a], capture_output=True, text=True, timeout=10).stdout.strip()
+    try:
+        head = git("log", "-1", "--format=%h (%cs)")
+        if not head:
+            return "gatekeeper_validate (version unknown: not a git clone)"
+        return f"gatekeeper_validate {head}" + (" +modified" if git("status", "--porcelain", "--", "*.py") else "")
+    except (OSError, subprocess.SubprocessError):
+        return "gatekeeper_validate (version unknown: git not available)"
+
+
 async def main():
     ap = argparse.ArgumentParser(description="Triage CAST Gatekeeper violations as true/false positives "
                                              "(ABAP, SAPUI5, SQL, JavaScript/TypeScript/web). See README.md.")
@@ -425,10 +443,14 @@ async def main():
                          "the console summary still counts them")
     ap.add_argument("--apply-exclusions", action="store_true")
     ap.add_argument("--list-rules", action="store_true")
+    ap.add_argument("--version", action="store_true", help="print the version (git commit) and exit")
     ap.add_argument("--coverage", action="store_true",
                     help="count the violations of the snapshot per rule and show which rules have a checker, are "
                          "review-only, or are not covered (needs --rest-url or --input; no source is read)")
     args = ap.parse_args()
+    print(version())
+    if args.version:
+        return
     cov_out = str(Path(args.out).with_name(Path(args.out).stem + "_coverage.csv"))
     if args.coverage and not (args.input or args.rest_url):
         ap.error("--coverage needs --rest-url or --input (the MCP mode has no call that lists every rule)")
