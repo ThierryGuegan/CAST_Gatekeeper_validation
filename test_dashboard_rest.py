@@ -277,6 +277,11 @@ def main():
     text, code = run(common + ["--rule-ids", "7544", "--dump"])
     check("--dump prints the violation, findings and source-codes", '"violation"' in text and '"findings"' in text and "7544" in text, text)
 
+    text, code = run(common + ["--rule-ids", "9999999", "--dump"])
+    check("--dump works for a rule without checker", '"violation"' in text and "no checker" in text and "skipped" not in text, text)
+    text, code = run(common + ["--rule-ids", "9999999"])
+    check("a rule without checker is skipped without --dump", "no checker for this rule id, skipped" in text, text)
+
     for argv, frag, name in [
         (["--rest-url", base, "--domain", D, "--user", "bob", "--password", "pw", "--app", "Nope"], "Available: MyApp", "unknown app"),
         (["--rest-url", base, "--domain", D, "--user", "bob", "--password", "bad", "--app", "MyApp"], "rejected the credentials", "bad password"),
