@@ -20,10 +20,14 @@ Only the shape of the violations list is documented in the pages this was writte
 Use `gatekeeper_validate.py --dump` to see what your server really returns.
 """
 import base64
+import http.client
 import json
 import os
 import re
+import socket
+import ssl
 import tempfile
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -31,6 +35,15 @@ import urllib.request
 
 class RestError(Exception):
     pass
+
+
+# A long run makes thousands of requests. Servers, proxies and firewalls sometimes close a connection
+# (WinError 10054 / "connection reset by peer"); that is retried a few times before giving up.
+RETRIES = 4                      # attempts per request
+BACKOFF = 1.0                    # seconds before the 2nd attempt, doubled after each failure
+RETRY_HTTP = {429, 500, 502, 503, 504}
+TRANSIENT = (ConnectionResetError, ConnectionAbortedError, BrokenPipeError, TimeoutError, socket.timeout,
+             http.client.RemoteDisconnected, http.client.IncompleteRead, http.client.BadStatusLine, ssl.SSLError)
 
 
 class DashboardClient:
@@ -57,15 +70,38 @@ class DashboardClient:
             u += ("&" if "?" in u else "?") + urllib.parse.urlencode(params)
         return u
 
+    def _fetch(self, u, headers):
+        """GET `u` and return (status, body bytes). Transient network errors and 429/5xx answers are retried
+        with a growing pause; other HTTP errors raise urllib's HTTPError, an exhausted retry raises RestError."""
+        last = None
+        for attempt in range(RETRIES):
+            try:
+                with urllib.request.urlopen(urllib.request.Request(u, headers=headers), timeout=self.timeout) as r:
+                    return r.status, r.read()
+            except urllib.error.HTTPError as e:
+                if e.code not in RETRY_HTTP or attempt == RETRIES - 1:
+                    raise
+                last = e
+            except urllib.error.URLError as e:
+                if not isinstance(e.reason, TRANSIENT):
+                    raise                       # DNS failure, connection refused, ...: retrying will not help
+                last = e.reason
+            except TRANSIENT as e:              # raised while reading the answer, not wrapped by urllib
+                last = e
+            if attempt < RETRIES - 1:
+                time.sleep(BACKOFF * 2 ** attempt)
+        raise RestError(f"The connection to {u} was interrupted {RETRIES} times in a row ({type(last).__name__}: "
+                        f"{last}). The server or a proxy closes connections, possibly because of the request rate: "
+                        f"run again later, or lower the load with --per-rule-limit / --limit")
+
     def _status(self, u, auth=True):
         """HTTP status of a GET on `u`, with or without the credentials (None if unreachable)."""
         headers = self.headers if auth else {"Accept": "application/json"}
         try:
-            with urllib.request.urlopen(urllib.request.Request(u, headers=headers), timeout=self.timeout) as r:
-                return r.status
+            return self._fetch(u, headers)[0]
         except urllib.error.HTTPError as e:
             return e.code
-        except urllib.error.URLError:
+        except (urllib.error.URLError, RestError):
             return None
 
     def explain_404(self, u):
@@ -84,10 +120,8 @@ class DashboardClient:
 
     def get(self, path, params=None):
         u = self.url(path, params)
-        req = urllib.request.Request(u, headers=self.headers)
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as r:
-                body = r.read().decode("utf-8", "replace")
+            body = self._fetch(u, self.headers)[1].decode("utf-8", "replace")
         except urllib.error.HTTPError as e:
             hint = {401: "check the credentials", 403: "the user/API key has no access to this domain or application"}.get(e.code, "")
             if e.code == 404:
@@ -106,10 +140,8 @@ class DashboardClient:
 
     def get_text(self, path, params=None):
         u = self.url(path, params)
-        req = urllib.request.Request(u, headers={**self.headers, "Accept": "text/plain, */*"})
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as r:
-                return r.read()
+            return self._fetch(u, {**self.headers, "Accept": "text/plain, */*"})[1]
         except urllib.error.HTTPError as e:
             raise RestError(f"HTTP {e.code} on {u}") from None
         except urllib.error.URLError as e:

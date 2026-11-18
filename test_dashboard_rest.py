@@ -1,5 +1,5 @@
 """Run: python3 test_dashboard_rest.py   (starts a fake Dashboard REST server on localhost; no mcp package needed)"""
-import asyncio, base64, contextlib, csv, io, json, sys, tempfile, threading
+import asyncio, base64, contextlib, csv, io, json, socket, sys, tempfile, threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
@@ -8,6 +8,8 @@ import dashboard_rest as dr
 import gatekeeper_validate as g
 
 FAILS, REQUESTS = [], []
+FLAKY = {}                     # path fragment -> number of requests to drop (connection closed without an answer)
+dr.BACKOFF = 0.01              # do not wait between retries in the tests
 D = "AAD"
 
 
@@ -52,6 +54,17 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         u = urlparse(self.path); q = {k: v[0] for k, v in parse_qs(u.query).items()}
         REQUESTS.append((u.path, q))
+        for frag, left in list(FLAKY.items()):
+            if frag in u.path and left > 0:                      # simulate "connection reset by peer"
+                FLAKY[frag] = left - 1
+                self.close_connection = True
+                try:
+                    self.request.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+                self.request.close()
+                self.wfile = io.BytesIO()
+                return
         basic = "Basic " + base64.b64encode(b"bob:pw").decode()
         ok = self.headers.get("Authorization") == basic or (
             self.headers.get("X-API-KEY") == "k3y" and self.headers.get("X-API-USER") == "bob")
@@ -196,6 +209,56 @@ def main():
     rows = list(csv.DictReader(open(out, encoding="utf-8-sig")))
     check("no download and no --source-root -> REVIEW", [r["verdict"] for r in rows] == ["REVIEW"] and "not available" in rows[0]["reason"], (rows, text))
     FILES.update(saved)
+
+    # --- flaky network: transient resets are retried, permanent ones are skipped without losing the run
+    vs = list(c.iter_violations(snap, "7544"))
+    apath = "D:\\deploy\\APP\\abap\\zprog.abap"
+    FLAKY["/components/1/snapshots/6/findings"] = 2
+    REQUESTS.clear()
+    locs = c.locations(vs[0])
+    check("transient connection resets are retried", locs == [(apath, 1, f100)], locs)
+    check("the failing request was retried (2 resets + 1 success)", sum("findings" in q for q, _ in REQUESTS) == 3, REQUESTS)
+    FLAKY.clear()
+
+    FLAKY["/components/2/snapshots/6/findings"] = 10 ** 6
+    try:
+        c.get(f"{D}/components/2/snapshots/6/findings/7544"); check("persistent reset raises", False, "no error")
+    except dr.RestError as e:
+        check("persistent reset -> clear message", "interrupted 4 times" in str(e) and "--per-rule-limit" in str(e), str(e))
+    check("violation whose findings never answer -> no location (not a crash)", c.locations(vs[1]) == [], c.locations(vs[1]))
+    out2 = tmp / "flaky.csv"
+    text, code = run(["--rest-url", base, "--domain", D, "--user", "bob", "--password", "pw", "--app", "MyApp",
+                      "--rule-ids", "7544", "--out", str(out2)])
+    rows = list(csv.DictReader(open(out2, encoding="utf-8-sig")))
+    check("run completes although one request keeps failing", code == 0 and len(rows) == 3, (code, text))
+    check("the unreachable violation is a REVIEW row, the others are still decided",
+          sorted(r["verdict"] for r in rows) == ["FALSE_POSITIVE", "REVIEW", "TRUE_POSITIVE"], [r["verdict"] for r in rows])
+    check("progress is printed", "[1/1] 7544" in text and "3 violation(s)" in text, text)
+    FLAKY.clear()
+
+    FLAKY["/file-contents/100"] = 10 ** 6                     # the file can never be downloaded
+    text, _ = run(common + ["--rule-ids", "7544", "--source-root", str(src)])
+    rows = list(csv.DictReader(open(out, encoding="utf-8-sig")))
+    check("failed download falls back to --source-root", "Could not download" in text and len(rows) == 3 and "REVIEW" not in [r["verdict"] for r in rows], (rows, text))
+    text, _ = run(common + ["--rule-ids", "7544"])
+    rows = list(csv.DictReader(open(out, encoding="utf-8-sig")))
+    check("failed download without --source-root -> REVIEW rows", [r["verdict"] for r in rows] == ["REVIEW"] * 3, [r["verdict"] for r in rows])
+    FLAKY.clear()
+
+    # an unexpected error in the middle of the run must not lose what was checked
+    real_classify, calls = g.classify, {"n": 0}
+    def boom(*a, **k):
+        calls["n"] += 1
+        if calls["n"] == 3:
+            raise RuntimeError("simulated crash")
+        return real_classify(*a, **k)
+    g.classify = boom
+    try:
+        text, code = run(common + ["--rule-ids", "7544"])
+    finally:
+        g.classify = real_classify
+    rows = list(csv.DictReader(open(out, encoding="utf-8-sig")))
+    check("a crash writes the partial report", code == 0 and len(rows) == 2 and "Stopped by an error" in text and "simulated crash" in text, (code, len(rows), text))
 
     text, code = run(common + ["--rule-ids", "7544", "--dump"])
     check("--dump prints the violation, findings and source-codes", '"violation"' in text and '"findings"' in text and "7544" in text, text)

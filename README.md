@@ -239,7 +239,9 @@ The MCP API requires `nb_rows` ≥ 10, so with `--limit` below 10 the tool fetch
 **Run time.** Every rule costs one request, and every violation one or two more (its findings, then the file the
 first time it is seen). `--rule-ids auto` covers more than 300 rules and can take a quarter of an hour or more
 against a remote server: start with `--limit` or `--per-rule-limit`, or pick a family (`abap`, `sapui5`, `web`,
-`sql`) or a list of rule ids.
+`sql`) or a list of rule ids. Progress is printed as the run goes (one line per rule that has violations, and a
+heartbeat every 25 rules). Ctrl+C, or an error in the middle of the run, still writes the report of what was checked
+so far.
 
 ## Report
 
@@ -279,6 +281,7 @@ groups, add `--no-true-positives`.
 | No violations for a rule in REST mode | Use the **engineering** domain (e.g. `AED` / `CENTRAL`), not a measurement-only one (e.g. `AAD`). Run with `--rule-ids <id> --dump` to see what the server returns. |
 | Many `REVIEW` rows saying "CAST reported this line" | The construct is not at the reported line: a line-anchoring difference or a checker limit. Look at the `evidence` column; if a pattern repeats, it is a candidate for a checker fix. |
 | `REVIEW` "Inside an AMDP method" / "SQL rule on an ABAP file" | SQLScript or embedded SQL inside ABAP is not parsed: review those by hand. |
+| `ConnectionResetError: [WinError 10054]` / "connection reset by peer" / "connection was interrupted 4 times" | The server, a proxy or a firewall closed the connection, often because a long run sends thousands of requests. Each request is retried 4 times with a growing pause. A request that still fails is skipped (the row becomes `REVIEW`, or the rule is skipped with a message) and the run continues. If the whole run stops, the report of what was checked so far is still written. Rerun later, or reduce the load with `--per-rule-limit`, `--limit` or a single family (`--rule-ids abap`). |
 | `Checker error: ...` in `reason` | A checker bug on an unusual construct: the run continues, the row is `REVIEW`. Please report the rule id and file. |
 | Full traceback needed | Set `GATEKEEPER_DEBUG=1`. |
 
