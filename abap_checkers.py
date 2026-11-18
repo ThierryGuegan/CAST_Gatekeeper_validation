@@ -857,6 +857,43 @@ def chk_empty_catch(ctx, n):                                        # 1104018, 1
     return FP, f"CATCH block handles the exception with {len(body)} statement(s), first at line {ctx.stmts[body[0]].first}: {ctx.stmts[body[0]].text[:70]}", ctx.ev(j, body[-1])
 
 
+# ===================== inspection / hard-coded path / switch default =====================
+INSPECTION_OFF = re.compile(r"\"\s*#\s*EC\b|##\s*[A-Za-z_]|\*\s*#\s*EC\b", re.I)
+
+
+def chk_inspection_off(ctx, n):                                     # 7884
+    i = ctx.stmt_at(n)
+    if i is None:
+        return NOSTMT
+    s = ctx.stmts[i]
+    for k in range(max(1, s.first - 1), min(len(ctx.lines), s.last + 1) + 1):
+        line = ctx.lines[k - 1]
+        for m in INSPECTION_OFF.finditer(line):
+            if where_in_line(line, m.start()) != "string":
+                return TP, f"Code inspection is switched off at line {k}: {line.strip()[:90]}", s.text
+    return RV, (f"No pseudo-comment (\"#EC ...) or pragma (##...) in the statement at line {n}: CAST may anchor the "
+                f"violation elsewhere, or the source differs from the analyzed version"), s.text
+
+
+STRONG_PATH = re.compile(r"^(?:[A-Za-z]:[\\/]|\\\\[\w$.-]+\\|/(?:usr|tmp|home|var|opt|data|mnt|sapmnt|interfaces|etc|srv|export|nfs)(?:/|$))")
+WEAK_PATH = re.compile(r"^/[\w.-]*[a-z][\w.-]*/[\w./-]+")
+
+
+def chk_hardcoded_path(ctx, n):                                     # 7526
+    i = ctx.stmt_at(n)
+    if i is None:
+        return NOSTMT
+    s = ctx.stmts[i]
+    lits = [a or b for a, b in re.findall(r"'([^']*)'|`([^`]*)`", s.text)]
+    strong = [x for x in lits if STRONG_PATH.match(x.strip())]
+    if strong:
+        return TP, f"Hard-coded file path {strong[0]!r} in the statement at line {s.first}", s.text
+    weak = [x for x in lits if WEAK_PATH.match(x.strip())]
+    if weak:
+        return RV, f"The literal {weak[0]!r} looks like a path or a URL; decide whether it is a file path", s.text
+    return RV, f"No path literal in the statement at line {n} (CAST may anchor it elsewhere)", s.text
+
+
 def chk_by_value(ctx, n):                                           # 7858
     i = ctx.stmt_at(n)
     if i is None:
@@ -971,13 +1008,15 @@ MANUAL = {
         7054, 7056, 7058, 7076, 7082, 7092, 7094, 7596, 7626, 7628, 7630, 7766, 7768, 7772, 7774, 7776, 7778,
         7792, 7796, 7798, 7802, 7842, 7944, 7934, 7586, 7810, 7828, 1101030],
     "documentation / comment ratio (threshold-based metric)": [
-        7060, 7062, 7066, 7068, 7568, 7570, 7818, 7836, 7838, 7846, 1104010, 1104012, 1104014, 1104016],
+        7060, 7062, 7066, 7068, 7568, 7570, 7612, 7818, 7834, 7836, 7838, 7846, 1104010, 1104012, 1104014, 1104016],
+    "copy-paste / commented-out code ratio (metric over the whole artifact)": [7126, 7156],
+    "cross-artifact data access / call graph (needs the whole application)": [7388, 7390, 7392, 7394],
     "naming convention (depends on your convention configuration)": [
         7050, 7072, 7074, 7088, 7598, 7602, 7786, 7848, 7852, 7854, 1104006],
-    "unreferenced object (needs the whole application call graph)": [7540, 7830, 7832, 7860, 7908, 7912],
+    "unreferenced object (needs the whole application call graph)": [7540, 7830, 7832, 7860, 7908, 7912, 3000092],
     "repeated table access in an include/program (needs cross-artifact analysis)": [
         7572, 7576, 7578, 7580, 7582, 7584],
-    "needs data-dictionary info (XXL tables, indexes, types)": [7420, 7662, 7902, 7904, 7670],
+    "needs data-dictionary info (XXL tables, indexes, types)": [7420, 7428, 7662, 7902, 7904, 7670],
     "CDS views / S4HANA (CDS source not handled)": [8566, 8568, 1104000, 1104002, 1104004, 1104008],
     "Web Dynpro / BAPI / semantic rule needing deeper analysis": [
         7850, 7888, 7890, 7892, 7864, 8114, 8584, 7624, 7680],
@@ -1029,7 +1068,10 @@ reg(7512, "Avoid empty Functions, Forms and Modules", chk_empty_proc)
 reg([7514, 7516], "Avoid empty Includes / Programs", chk_empty_file)
 reg(8106, "Avoid empty IF-ENDIF blocks", chk_empty_if)
 reg(7518, "Avoid missing WHEN OTHERS in CASE statements or ELSE in COND expressions", chk_case_others)
-reg([1104018, 1060020], "Avoid empty catch blocks", chk_empty_catch)
+reg([1104018, 1060020, 7788], "Avoid empty catch blocks", chk_empty_catch)
+reg(8028, "Avoid missing default in switch statements", chk_case_others)
+reg(7884, "Avoid disabling source code inspection", chk_inspection_off)
+reg(7526, "Avoid using hard-coded paths", chk_hardcoded_path)
 reg(7858, "Avoid passing parameter by value", chk_by_value)
 reg(7672, "Avoid using EXIT statement in Include", chk_exit)
 reg(7906, "Avoid testing specific values for SY-UNAME", chk_sy_uname)
