@@ -2,6 +2,11 @@ __pycache__/
 *.pyc
 report.csv
 *.abap
+run.bat
+report3.csv
 /src_test
+report2.csv
+test.csv
+report_coverage.csv
 run.bat
 run.bat
