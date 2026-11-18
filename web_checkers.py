@@ -95,6 +95,45 @@ def stack_at_col(ctx, n, col):
     return stack
 
 
+def _header_before(s, pos, limit=600):
+    """Text of the statement/block header that ends just before s[pos]: back to the previous ; { } outside parentheses."""
+    j, pd = pos - 1, 0
+    while j >= 0 and pos - j < limit:
+        c = s[j]
+        if c == ")":
+            pd += 1
+        elif c == "(":
+            pd -= 1
+        elif c in ";{}" and pd <= 0:
+            break
+        j -= 1
+    return s[j + 1:pos].strip(), j
+
+
+def enclosing_blocks(ctx, n, col, back=4000):
+    """(header of the statement at line n / col, kinds of the enclosing blocks, innermost first up to the function).
+    Scans backwards from the statement, so a wrong block structure earlier in the file cannot hide the loop."""
+    first = max(0, n - 1 - back)
+    s = "\n".join(ctx.bare[first:n - 1] + [ctx.bare[n - 1][:col]])
+    own, j = _header_before(s, len(s))
+    kinds, depth, i = [], 0, j
+    while i >= 0:
+        c = s[i]
+        if c == "}":
+            depth += 1
+        elif c == "{":
+            if depth == 0:
+                h, _ = _header_before(s, i)
+                k = _classify(h)
+                kinds.append(k)
+                if k in ("function", "iterfn"):
+                    break
+            else:
+                depth -= 1
+        i -= 1
+    return own, kinds
+
+
 def enclosing_loop(ctx, n, kinds=LOOPS):
     for k in reversed(stack_at(ctx, n)):
         if k in kinds:
@@ -175,7 +214,7 @@ def chk_empty_did_catch(ctx, n):                                     # 1020452, 
 def chk_switch_default(ctx, n):                                      # 1020180, 8028
     if not ctx.ok(n):
         return NOLINE
-    text = "\n".join(ctx.bare[n - 1:n - 1 + 80])
+    text = "\n".join(ctx.bare[n - 1:n - 1 + 3000])
     first_len = len(ctx.bare[n - 1])
     starts = [m for m in re.finditer(r"\bswitch\b[^{]*\{", text) if m.start() <= first_len]
     if not starts:
@@ -211,14 +250,21 @@ def chk_break_in_for(ctx, n):                                        # 1020182, 
     if not ctx.ok(n):
         return NOLINE
     line = ctx.bare[n - 1]
-    brks = [m for m in re.finditer(r"\bbreak\b", line)]
+    brks = list(re.finditer(r"\bbreak\b", line))
     if not brks:
         return RV, "No break statement at the reported line", _ev(ctx, n)
-    seen = set()
+    seen, trail = set(), []
     for m in brks:
         if re.match(r"\s*[A-Za-z_$]", line[m.end():]) and not re.match(r"\s*(?:case|default)\b", line[m.end():]):
             return RV, "Labeled break: the target loop must be checked manually", _ev(ctx, n)
-        for k in reversed(stack_at_col(ctx, n, m.start())):
+        own, kinds = enclosing_blocks(ctx, n, m.start())
+        trail = kinds
+        if re.match(r"(?:for|while|do)\b", own):                          # brace-less loop: the break is its statement
+            if own.startswith("for"):
+                return TP, "break is the body of a for loop", _ev(ctx, n)
+            seen.add(own.split()[0].split("(")[0])
+            continue
+        for k in kinds:
             if k == "for":
                 return TP, "break inside a for loop", _ev(ctx, n)
             if k in ("switch", "while", "do"):
@@ -233,9 +279,8 @@ def chk_break_in_for(ctx, n):                                        # 1020182, 
         return FP, "break leaves a switch, not a for loop", _ev(ctx, n)
     if seen <= {"switch", "while", "do"}:
         return FP, f"the break is in a {sorted(seen - {'switch'})[0]} loop, not a for loop", _ev(ctx, n)
-    near = " ".join(ctx.bare[max(0, n - 4):n])
-    return RV, ("No enclosing for/while/switch block was found for the break (brace-less loop, unusual layout or a "
-                "different anchor line)" + (": a 'for' appears a few lines above" if re.search(r"\bfor\s*\(", near) else "")), _ev(ctx, n)
+    return RV, ("No enclosing for/while/switch block was found for the break (enclosing blocks, innermost first: "
+                + (" > ".join(trail) or "none") + ")"), _ev(ctx, n)
 
 
 def chk_function_in_loop(ctx, n):                                    # 1020038
